@@ -34,19 +34,40 @@ class ImageGenerator:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--hide-scrollbars")
 
-        # Initialize the driver
-        try:
-            # Attempt to use ChromeDriverManager to find/update the driver (requires internet)
-            driver_path = ChromeDriverManager().install()
-            service = ChromeService(driver_path)
-        except Exception:
-            # Fallback for offline mode: Use the default service
-            # This relies on a driver being in your PATH or Selenium's internal cache
-            print("[WARNING] Internet unreachable: Skipping driver update check and using default/system driver.")
-            service = ChromeService()
+        # --- 1. CHECK FOR BUNDLED (OFFLINE) CHROME ---
+        # Look for a 'bin' folder in the current working directory
+        cwd = os.getcwd()
+        bundled_chrome = os.path.join(cwd, "bin", "chrome-win64", "chrome.exe")
+        bundled_driver = os.path.join(cwd, "bin", "chromedriver-win64", "chromedriver.exe")
 
-        driver = webdriver.Chrome(service=service, options=options)
-        return driver
+        service = None
+
+        if os.path.exists(bundled_chrome) and os.path.exists(bundled_driver):
+            print(f"[DEBUG] Using Bundled Offline Chrome: {bundled_chrome}")
+            options.binary_location = bundled_chrome
+            service = ChromeService(executable_path=bundled_driver)
+
+        else:
+            # --- 2. FALLBACK TO SYSTEM CHROME ---
+            print("[DEBUG] Bundled Chrome not found. Attempting System Chrome...")
+
+            try:
+                # Attempt to use ChromeDriverManager to find/update the driver (requires internet)
+                driver_path = ChromeDriverManager().install()
+                service = ChromeService(driver_path)
+            except Exception:
+                # Fallback for offline mode: Use the default service
+                # This relies on a driver being in your PATH or Selenium's internal cache
+                print("[WARNING] Internet unreachable: Skipping driver update check and using default/system driver.")
+                service = ChromeService()
+
+        try:
+            driver = webdriver.Chrome(service=service, options=options)
+            return driver
+        except Exception as e:
+            print("[CRITICAL] Failed to initialize Chrome Driver.")
+            print(f"Path used: {bundled_chrome if os.path.exists(bundled_chrome) else 'System Default'}")
+            raise e
 
     def _configure_viewport(self):
         """
