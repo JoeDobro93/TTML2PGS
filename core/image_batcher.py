@@ -64,6 +64,7 @@ class ImageBatcher:
                             override_font_size=False, global_font_size=50.0, global_font_size_unit="px",
                             override_color=False, global_color="#FFFFFF",
                             override_outline=False, global_outline_enabled=True, global_outline_color="#000000",
+                            global_shadow_alpha=1.0,
                             global_outline_width=3.0, global_outline_unit="px",
                             override_shadow=False, global_shadow_enabled=True, global_shadow_color="#000000",
                             global_shadow_offset_x=4.0, global_shadow_offset_y=4.0, global_shadow_blur=2.0,
@@ -85,6 +86,7 @@ class ImageBatcher:
         self.override_shadow = override_shadow
         self.global_shadow_enabled = global_shadow_enabled
         self.global_shadow_color = global_shadow_color
+        self.global_shadow_alpha = global_shadow_alpha
         self.global_shadow_offset_x = global_shadow_offset_x
         self.global_shadow_offset_y = global_shadow_offset_y
         self.global_shadow_blur = global_shadow_blur
@@ -139,8 +141,10 @@ class ImageBatcher:
             global_outline_color=self.global_outline_color, global_outline_width=self.global_outline_width,
             global_outline_unit=self.global_outline_unit,
             override_shadow=self.override_shadow, global_shadow_enabled=self.global_shadow_enabled,
-            global_shadow_color=self.global_shadow_color, global_shadow_offset_x=self.global_shadow_offset_x,
-            global_shadow_offset_y=self.global_shadow_offset_y, global_shadow_blur=self.global_shadow_blur
+            global_shadow_color=self.global_shadow_color, global_shadow_alpha=self.global_shadow_alpha,
+            global_shadow_offset_x=self.global_shadow_offset_x,
+            global_shadow_offset_y=self.global_shadow_offset_y, global_shadow_blur=self.global_shadow_blur,
+            global_alpha=self.global_alpha
         )
         log_step("Renderer Init", t_renderer_setup)
 
@@ -177,19 +181,23 @@ class ImageBatcher:
                 # Get Raw PNG Bytes (RAM)
                 png_bytes = img_gen.get_image_bytes(html_content)
 
-                # Process with PIL in RAM (No Disk I/O yet)
                 with Image.open(io.BytesIO(png_bytes)) as img:
-                    img = img.convert("RGBA")
-
-                    # Apply Alpha Calculation in RAM
-                    if 0.0 <= self.global_alpha < 1.0:
-                        r, g, b, a = img.split()
-                        # Multiply existing alpha channel by global_alpha
-                        new_alpha = a.point(lambda p: int(p * self.global_alpha))
-                        img.putalpha(new_alpha)
-
-                    # 4. Save to Disk (Once)
+                    # No alpha math needed here anymore!
                     img.save(img_path)
+
+                # # Process with PIL in RAM (No Disk I/O yet)
+                # with Image.open(io.BytesIO(png_bytes)) as img:
+                #     img = img.convert("RGBA")
+                #
+                #     # Apply Alpha Calculation in RAM
+                #     if 0.0 <= self.global_alpha < 1.0:
+                #         r, g, b, a = img.split()
+                #         # Multiply existing alpha channel by global_alpha
+                #         new_alpha = a.point(lambda p: int(p * self.global_alpha))
+                #         img.putalpha(new_alpha)
+                #
+                #     # 4. Save to Disk (Once)
+                #     img.save(img_path)
 
                 # C. Collect Metadata (Raw Source Times)
                 manifest_cues.append({

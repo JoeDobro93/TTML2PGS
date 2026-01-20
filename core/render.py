@@ -31,8 +31,10 @@ class HtmlRenderer:
                  global_outline_color: str = "#000000", global_outline_width: float = 3.0,
                  global_outline_unit: str = "px",
                  override_shadow: bool = False, global_shadow_enabled: bool = True,
-                 global_shadow_color: str = "#000000", global_shadow_offset_x: float = 4.0,
-                 global_shadow_offset_y: float = 4.0, global_shadow_blur: float = 2.0):
+                 global_shadow_color: str = "#000000", global_shadow_alpha: float = 1.0,
+                 global_shadow_offset_x: float = 4.0, global_shadow_offset_y: float = 4.0,
+                 global_shadow_blur: float = 2.0,
+                 global_alpha: float = 1.0):
 
         self.project = project
         self.content_resolution = content_resolution
@@ -55,9 +57,12 @@ class HtmlRenderer:
         self.override_shadow = override_shadow
         self.global_shadow_enabled = global_shadow_enabled
         self.global_shadow_color = global_shadow_color
+        self.global_shadow_alpha = global_shadow_alpha
         self.global_shadow_offset_x = global_shadow_offset_x
         self.global_shadow_offset_y = global_shadow_offset_y
         self.global_shadow_blur = global_shadow_blur
+
+        self.global_alpha = global_alpha
 
     def render_cue_to_html(self, cue: Cue, preview_bg: Optional[str] = None) -> str:
         # --- LIVE PREVIEW ---
@@ -150,6 +155,10 @@ class HtmlRenderer:
     position: relative;
     display: inline-block;
     line-height: normal;
+    opacity: {self.global_alpha};
+    
+    -webkit-text-stroke: var(--sw) var(--sc);
+    
     paint-order: stroke fill;
     stroke-linejoin: round;
     -webkit-stroke-linejoin: round;
@@ -185,11 +194,12 @@ class HtmlRenderer:
     position: relative;
     z-index: 0; /* Sit behind the base text */
     top: var(--rt-top, 0);
-    
     line-height: var(--rt-lh, 1.0);
     
-    /* Boost outline thickness for tiny text to prevent jagged/steppy edges */
-    --sw-scale: 1.5;
+    -webkit-text-stroke: calc(var(--sw) * 1.0 var(--sc);
+
+    /* old outline method Boost outline thickness for tiny text to prevent jagged/steppy edges */
+    /* --sw-scale: 1.5; */
 
     /* NOTE: The text-shadow property is generated dynamically in Python 
        and injected inline, so we don't define it here anymore. */
@@ -523,8 +533,8 @@ class HtmlRenderer:
                 if char_transform:
                     # Wrapper for Skew
                     parts.append(
-                        f'<span class="cap" style="{char_transform}">'
-                        f'<ruby style="{ruby_style}">{inner_content}</ruby>'
+                        f'<span style="display: inline-block; {char_transform}">'
+                        f'<ruby class="cap" style="{ruby_style}">{inner_content}</ruby>'
                         f'</span>'
                     )
                 else:
@@ -608,35 +618,44 @@ class HtmlRenderer:
         o_color = self.global_outline_color if self.override_outline else style.outline_color
         o_unit = self.global_outline_unit if self.override_outline else (style.outline_unit or 'px')
 
-        # Force 64 steps for everything.
-        # This ensures even thin lines on small text (furigana) are buttery smooth.
-        steps = 32
-        # print(f"[RENDER] {steps} steps")
-
         if use_outline and o_width and o_color:
+            # We simply inject the CSS variables here.
+            # The Global CSS (.cap) applies -webkit-text-stroke: var(--sw) var(--sc).
+            # This ensures Ruby tags can access these vars and calculate their own scaled width.
             css.append(f"--sw: {o_width}{o_unit}")
             css.append(f"--sc: {o_color}")
-
-            for i in range(steps):
-                angle = (2 * math.pi * i) / steps
-                x = math.cos(angle)
-                y = math.sin(angle)
-
-                shadows.append(
-                    f"calc(var(--sw) * var(--sw-scale, 1) * {x:.3f}) "
-                    f"calc(var(--sw) * var(--sw-scale, 1) * {y:.3f}) "
-                    f"0 var(--sc)"
-                )
 
         # --- SHADOW ---
         use_shadow = self.global_shadow_enabled if self.override_shadow else style.shadow_enabled
         s_color = self.global_shadow_color if self.override_shadow else style.shadow_color
+        s_alpha = self.global_shadow_alpha if self.override_shadow else getattr(style, 'shadow_alpha', 1.0)
+        if s_alpha is None: s_alpha = 1.0
+
+        # Helper: Convert Hex (#RRGGBB) -> rgba(r, g, b, a)
+        def hex_to_rgba(hex_code, alpha):
+            if not hex_code: return None
+            hex_code = hex_code.lstrip('#')
+            if len(hex_code) == 6:
+                try:
+                    r = int(hex_code[0:2], 16)
+                    g = int(hex_code[2:4], 16)
+                    b = int(hex_code[4:6], 16)
+                    return f"rgba({r}, {g}, {b}, {alpha})"
+                except:
+                    return hex_code
+            return hex_code
+
         s_off_x = self.global_shadow_offset_x if self.override_shadow else style.shadow_offset_x
         s_off_y = self.global_shadow_offset_y if self.override_shadow else style.shadow_offset_y
         s_blur = self.global_shadow_blur if self.override_shadow else style.shadow_blur
         s_unit = 'px' if self.override_shadow else (style.shadow_unit or 'px')
 
         if use_shadow and s_color:
+            final_color_str = hex_to_rgba(s_color, s_alpha)
+
+            # If hex conversion failed (e.g. named color), fall back to raw string
+            if not final_color_str: final_color_str = s_color
+
             def to_css(val, unit):
                 return f"{val}{unit}" if isinstance(val, (int, float)) else str(val)
 
@@ -644,22 +663,28 @@ class HtmlRenderer:
             oy = to_css(s_off_y or 0, s_unit)
 
             # Retrieve injected blur (default to 0 if missing)
-            blur = to_css(style.shadow_offset_x or 0, s_unit)
+            blur = to_css(s_blur or 0, s_unit)
 
+            if not self.override_shadow and " " in s_color and "drop-shadow" in s_color:
+                # If the raw string already contains drop-shadow logic (rare VTT case), use it.
+                shadows.append(final_color_str)
             # Check if it's a raw VTT string (only if NOT overriding)
-            if not self.override_shadow and " " in s_color:
-                shadows.append(s_color)
+            elif not self.override_shadow and " " in s_color:
+                shadows.append(f"drop-shadow({ox} {oy} {blur} {final_color_str})")
             else:
-                shadows.append(f"{ox} {oy} {blur} {s_color}")
+                # Standard Construction
+                shadows.append(f"drop-shadow({ox} {oy} {blur} {final_color_str})")
 
         if shadows:
-            css.append(f"text-shadow: {', '.join(shadows)}")
+            css.append(f"filter: {' '.join(shadows)}")
+            # old css.append(f"text-shadow: {', '.join(shadows)}")
 
         if style.text_emphasis_style:
             col = style.text_emphasis_color or "currentcolor"
             css.append(f"text-emphasis: {style.text_emphasis_style} {col}")
             pos = style.text_emphasis_position or ("right" if is_vertical else "over")
             css.append(f"text-emphasis-position: {pos}")
+            css.append(f"-webkit-text-emphasis-position: {pos}")
 
         # TODO: Implement text-combine-upright (Tate-chu-yoko)
         # Currently, the ingest parser reads it into style.text_combine, but we are

@@ -141,6 +141,12 @@ class SettingsPane(QWidget):
             btn_col = QPushButton()
             btn_col.setFixedWidth(80)
 
+            spin_a = QDoubleSpinBox()
+            spin_a.setRange(0.0, 1.0)
+            spin_a.setSingleStep(0.05)
+            spin_a.setFixedWidth(60)
+            spin_a.setToolTip("Alpha/Opacity (0.0 - 1.0)")
+
             lbl_swatch = QLabel()
             lbl_swatch.setFixedSize(20, 20)
             lbl_swatch.setStyleSheet("border: 1px solid #505050;")
@@ -150,6 +156,11 @@ class SettingsPane(QWidget):
                 if text in self.color_presets and text != "Custom":
                     c, a = self.color_presets[text]
                     btn_col.setText(c)
+
+                    spin_a.blockSignals(True)
+                    spin_a.setValue(float(a))
+                    spin_a.blockSignals(False)
+
                     self.update_swatch(lbl_swatch, c)
                 # If Custom, we leave the button as is (user edits it manually)
                 self.emit_change()
@@ -171,24 +182,35 @@ class SettingsPane(QWidget):
 
             cmb.currentTextChanged.connect(on_combo_change)
             btn_col.clicked.connect(on_btn_click)
+            spin_a.valueChanged.connect(self.emit_change)
 
             # Init Defaults
             def_c, def_a = self.color_presets[default_preset]
             btn_col.setText(def_c)
+            spin_a.blockSignals(True)
+            spin_a.setValue(def_a)
+            spin_a.blockSignals(False)
             self.update_swatch(lbl_swatch, def_c)
 
             row_layout = QHBoxLayout()
             row_layout.addWidget(cmb)
             row_layout.addWidget(btn_col)
             row_layout.addWidget(lbl_swatch)
-            return cmb, btn_col, row_layout
+            row_layout.addSpacing(10)
+            row_layout.addWidget(QLabel("Alpha:"))
+            row_layout.addWidget(spin_a)
+            row_layout.setStretch(0, 1)
+
+            return cmb, btn_col, spin_a, row_layout
 
         # SDR Row
-        self.cmb_auto_sdr, self.btn_auto_sdr, row_sdr = build_auto_row("SDR Default:", "SDR White 01")
+        self.cmb_auto_sdr, self.btn_auto_sdr, self.spin_auto_sdr_alpha, row_sdr = build_auto_row("SDR Default:",
+                                                                                                 "SDR White 01")
         auto_layout.addRow("SDR Default:", row_sdr)
 
         # HDR Row
-        self.cmb_auto_hdr, self.btn_auto_hdr, row_hdr = build_auto_row("HDR Default:", "HDR Grey 01")
+        self.cmb_auto_hdr, self.btn_auto_hdr, self.spin_auto_hdr_alpha, row_hdr = build_auto_row("HDR Default:",
+                                                                                                 "HDR Grey 01")
         auto_layout.addRow("HDR Default:", row_hdr)
 
         layout.addRow(self.gb_auto)
@@ -249,6 +271,9 @@ class SettingsPane(QWidget):
         self.spin_outline_width = QDoubleSpinBox();
         self.spin_outline_width.setValue(2.0)
         self.spin_outline_width.setSingleStep(0.25)
+        self.cmb_outline_unit = QComboBox()
+        self.cmb_outline_unit.addItems(["px", "em", "%"])
+        self.cmb_outline_unit.setFixedWidth(50)  # Optional: keep it compact
         self.btn_outline_color = QPushButton("#000000")
         self.lbl_outline_swatch = QLabel();
         self.lbl_outline_swatch.setFixedSize(20, 20);
@@ -260,6 +285,7 @@ class SettingsPane(QWidget):
         o_layout.addWidget(self.chk_outline_enable)
         o_layout.addWidget(QLabel("Width:"))
         o_layout.addWidget(self.spin_outline_width)
+        o_layout.addWidget(self.cmb_outline_unit)
         o_layout.addWidget(self.btn_outline_color)
         o_layout.addWidget(self.lbl_outline_swatch)
         layout.addRow(self.chk_outline, o_layout)
@@ -271,18 +297,27 @@ class SettingsPane(QWidget):
         self.chk_shadow_enable = QCheckBox("Enabled")
         self.chk_shadow_enable.setChecked(True)
         apply_grey_style(self.chk_shadow_enable)
-        self.spin_shadow_x = QDoubleSpinBox();
+
+        self.spin_shadow_x = QDoubleSpinBox()
         self.spin_shadow_x.setValue(2.0)
-        self.spin_shadow_y = QDoubleSpinBox();
+        self.spin_shadow_y = QDoubleSpinBox()
         self.spin_shadow_y.setValue(2.0)
-        self.spin_shadow_blur = QDoubleSpinBox();
-        self.spin_shadow_blur.setValue(2.0)
+        self.spin_shadow_blur = QDoubleSpinBox()
+        self.spin_shadow_blur.setValue(1.0)
+
         self.btn_shadow_color = QPushButton("#000000")
-        self.lbl_shadow_swatch = QLabel();
+        self.lbl_shadow_swatch = QLabel()
         self.lbl_shadow_swatch.setFixedSize(20, 20);
         self.lbl_shadow_swatch.setStyleSheet("border: 1px solid #505050; background-color: #000000;")
-
         self.btn_shadow_color.clicked.connect(lambda: self.pick_color(self.btn_shadow_color, self.lbl_shadow_swatch))
+
+        self.spin_shadow_alpha = QDoubleSpinBox()
+        self.spin_shadow_alpha.setRange(0.0, 1.0)
+        self.spin_shadow_alpha.setSingleStep(0.1)
+        self.spin_shadow_alpha.setValue(0.5)
+        self.spin_shadow_alpha.setToolTip("Shadow Opacity (0.0 - 1.0)")
+        self.spin_shadow_alpha.setFixedWidth(50)
+        self.spin_shadow_alpha.valueChanged.connect(self.emit_change)
 
         s_layout = QHBoxLayout()
         s_layout.addWidget(self.chk_shadow_enable)
@@ -292,8 +327,12 @@ class SettingsPane(QWidget):
         s_layout.addWidget(self.spin_shadow_y)
         s_layout.addWidget(QLabel("Blur:"))
         s_layout.addWidget(self.spin_shadow_blur)
+
         s_layout.addWidget(self.btn_shadow_color)
+        s_layout.addWidget(QLabel("Alpha:"))
+        s_layout.addWidget(self.spin_shadow_alpha)
         s_layout.addWidget(self.lbl_shadow_swatch)
+
         layout.addRow(self.chk_shadow, s_layout)
 
         # Alpha
@@ -384,7 +423,7 @@ class SettingsPane(QWidget):
         # Connect signals for basic widgets
         for w in [self.chk_font, self.chk_color, self.chk_outline, self.chk_shadow,
                   self.spin_font_size, self.cmb_font_unit, self.chk_outline_enable,
-                  self.spin_outline_width, self.chk_shadow_enable, self.spin_shadow_x,
+                  self.spin_outline_width, self.cmb_outline_unit, self.chk_shadow_enable, self.spin_shadow_x,
                   self.spin_shadow_y, self.spin_shadow_blur, self.spin_alpha,
                   self.spin_ar_num, self.spin_ar_den, self.chk_override_ar]:
             try:
@@ -640,12 +679,12 @@ class SettingsPane(QWidget):
             set_visual_state(self.chk_color.isChecked(), [self.btn_color, self.lbl_color_swatch])
 
         set_visual_state(self.chk_outline.isChecked(),
-                         [self.chk_outline_enable, self.spin_outline_width, self.btn_outline_color,
-                          self.lbl_outline_swatch])
+                         [self.chk_outline_enable, self.spin_outline_width, self.cmb_outline_unit,
+                          self.btn_outline_color, self.lbl_outline_swatch])
 
         set_visual_state(self.chk_shadow.isChecked(),
                          [self.chk_shadow_enable, self.spin_shadow_x, self.spin_shadow_y, self.spin_shadow_blur,
-                          self.btn_shadow_color, self.lbl_shadow_swatch])
+                          self.btn_shadow_color, self.lbl_shadow_swatch, self.spin_shadow_alpha])
 
         set_visual_state(self.chk_override_ar.isChecked(), [self.spin_ar_num, self.spin_ar_den])
 
@@ -691,17 +730,15 @@ class SettingsPane(QWidget):
         # Get Auto Alpha values based on preset map or default 1.0
         # Since the auto UI allows custom colors but the combo might hold the alpha info:
 
-        # 1. Resolve SDR Alpha
-        sdr_preset = self.cmb_auto_sdr.currentText()
-        sdr_alpha = 1.0
-        if sdr_preset in self.color_presets:
-            sdr_alpha = self.color_presets[sdr_preset][1]
+        # Safety Check: If UI isn't fully built, return defaults
+        if not hasattr(self, 'spin_auto_sdr_alpha') or not hasattr(self, 'spin_auto_hdr_alpha'):
+            return {}
 
-        # 2. Resolve HDR Alpha
-        hdr_preset = self.cmb_auto_hdr.currentText()
-        hdr_alpha = 1.0
-        if hdr_preset in self.color_presets:
-            hdr_alpha = self.color_presets[hdr_preset][1]
+        # 1. Resolve SDR Alpha (Directly from UI)
+        sdr_alpha = self.spin_auto_sdr_alpha.value()
+
+        # 2. Resolve HDR Alpha (Directly from UI)
+        hdr_alpha = self.spin_auto_hdr_alpha.value()
 
         return {
             "override_font_size": self.chk_font.isChecked(),
@@ -715,10 +752,12 @@ class SettingsPane(QWidget):
             "global_outline_enabled": self.chk_outline_enable.isChecked(),
             "global_outline_color": self.btn_outline_color.text(),
             "global_outline_width": self.spin_outline_width.value(),
+            "global_outline_unit": self.cmb_outline_unit.currentText(),
 
             "override_shadow": self.chk_shadow.isChecked(),
             "global_shadow_enabled": self.chk_shadow_enable.isChecked(),
             "global_shadow_color": self.btn_shadow_color.text(),
+            "global_shadow_alpha": self.spin_shadow_alpha.value(),
             "global_shadow_offset_x": self.spin_shadow_x.value(),
             "global_shadow_offset_y": self.spin_shadow_y.value(),
             "global_shadow_blur": self.spin_shadow_blur.value(),

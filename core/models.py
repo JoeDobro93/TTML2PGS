@@ -65,6 +65,7 @@ class Style:
     # -- Shadow --
     shadow_enabled: Optional[bool] = None
     shadow_color: Optional[str] = None
+    shadow_alpha: Optional[float] = None
     shadow_offset_x: Optional[float] = None
     shadow_offset_y: Optional[float] = None
     shadow_blur: Optional[float] = None
@@ -148,9 +149,10 @@ class Style:
 
             shadow_enabled=True,
             shadow_color="#000000",
-            shadow_offset_x=2.0,
-            shadow_offset_y=2.0,
-            shadow_blur=0.1,
+            shadow_alpha=0.5,
+            shadow_offset_x=1.0,
+            shadow_offset_y=1.0,
+            shadow_blur=1.0,
             shadow_unit="px",
 
             line_height=1.2,

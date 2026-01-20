@@ -180,9 +180,9 @@ class PreviewPane(QWidget):
             if k in renderer_args:
                 renderer_args.pop(k)
 
-        if 'global_alpha' in renderer_args:
-            alpha = renderer_args.pop('global_alpha')
-            self.view_fg.setWindowOpacity(alpha)
+        # if 'global_alpha' in renderer_args:
+        #     alpha = renderer_args.pop('global_alpha')
+        #     self.view_fg.setWindowOpacity(alpha)
 
         try:
             print(f"[DEBUG] Initializing HtmlRenderer with content_res: {content_res}")
