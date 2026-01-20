@@ -8,6 +8,7 @@ Generates a manifest.json containing source times and project settings.
 import os
 import json
 import time
+import io
 from typing import Optional, List, Dict
 from PIL import Image
 
@@ -164,17 +165,33 @@ class ImageBatcher:
                 filename = f"cue{seq_num:05d}.png"
                 img_path = os.path.join(self.images_dir, filename)
 
-                # A. Render HTML
+                # Render HTML
                 html_content = html_renderer.render_cue_to_html(cue)
 
-                # B. Generate PNG
-                img_gen.render_html_to_png(html_content, img_path)
-                # Apply alpha
-                if self.global_alpha < 1.0 and self.global_alpha >= 0.0:
-                    self._apply_global_alpha(img_path, self.global_alpha)
+                # # Generate PNG
+                # img_gen.render_html_to_png(html_content, img_path)
+                # # Apply alpha
+                # if self.global_alpha < 1.0 and self.global_alpha >= 0.0:
+                #     self._apply_global_alpha(img_path, self.global_alpha)
+
+                # Get Raw PNG Bytes (RAM)
+                png_bytes = img_gen.get_image_bytes(html_content)
+
+                # Process with PIL in RAM (No Disk I/O yet)
+                with Image.open(io.BytesIO(png_bytes)) as img:
+                    img = img.convert("RGBA")
+
+                    # Apply Alpha Calculation in RAM
+                    if 0.0 <= self.global_alpha < 1.0:
+                        r, g, b, a = img.split()
+                        # Multiply existing alpha channel by global_alpha
+                        new_alpha = a.point(lambda p: int(p * self.global_alpha))
+                        img.putalpha(new_alpha)
+
+                    # 4. Save to Disk (Once)
+                    img.save(img_path)
 
                 # C. Collect Metadata (Raw Source Times)
-                # FIX: Used correct attribute names (.start_ms, .end_ms)
                 manifest_cues.append({
                     "id": cue.start_ms,
                     "filename": filename,

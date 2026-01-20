@@ -215,6 +215,7 @@ class SettingsPane(QWidget):
         apply_grey_style(self.chk_font)
         self.spin_font_size = QDoubleSpinBox()
         self.spin_font_size.setValue(4.5)
+        self.spin_font_size.setSingleStep(0.25)
         self.cmb_font_unit = QComboBox()
         self.cmb_font_unit.addItems(["vh", "px", "em", "%"])
         f_layout = QHBoxLayout();
@@ -246,7 +247,8 @@ class SettingsPane(QWidget):
         self.chk_outline_enable.setChecked(True)
         apply_grey_style(self.chk_outline_enable)
         self.spin_outline_width = QDoubleSpinBox();
-        self.spin_outline_width.setValue(3.0)
+        self.spin_outline_width.setValue(2.0)
+        self.spin_outline_width.setSingleStep(0.25)
         self.btn_outline_color = QPushButton("#000000")
         self.lbl_outline_swatch = QLabel();
         self.lbl_outline_swatch.setFixedSize(20, 20);
@@ -270,9 +272,9 @@ class SettingsPane(QWidget):
         self.chk_shadow_enable.setChecked(True)
         apply_grey_style(self.chk_shadow_enable)
         self.spin_shadow_x = QDoubleSpinBox();
-        self.spin_shadow_x.setValue(4.0)
+        self.spin_shadow_x.setValue(2.0)
         self.spin_shadow_y = QDoubleSpinBox();
-        self.spin_shadow_y.setValue(4.0)
+        self.spin_shadow_y.setValue(2.0)
         self.spin_shadow_blur = QDoubleSpinBox();
         self.spin_shadow_blur.setValue(2.0)
         self.btn_shadow_color = QPushButton("#000000")

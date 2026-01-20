@@ -991,6 +991,24 @@ class WebVTTIngester:
                 elif tag_name == 'br':
                     fragments.append(Fragment(text="\n", calculated_style=current_style, applied_style_ids=["VTT_BR"]))
 
+                elif tag_name == 'i':
+                    if is_close:
+                        # POP Style
+                        if len(style_stack) > 1:
+                            style_stack.pop()
+                            current_style = style_stack[-1]
+                        else:
+                            current_style = base_style
+                    else:
+                        # PUSH Style (Apply 16% Skew)
+                        # We apply skew_angle instead of font_style="italic" to mimic
+                        # the tts:shear geometric slant common in IMSC/TTML workflows.
+                        skew_s = Style(id="vtt_i_skew", skew_angle=16.667)
+
+                        new_style = current_style.merge_from(skew_s)
+                        style_stack.append(new_style)
+                        current_style = new_style
+
                 elif tag_name == 'c':
                     if is_close:
                         # POP Style
@@ -1055,70 +1073,29 @@ class WebVTTIngester:
                 close_idx = text.find(')', i)
                 if close_idx != -1:
                     furigana = text[i + 1:close_idx]
-                    base_len = 0
 
-                    if len(furigana) > 0 and len(set(furigana)) == 1 and not (
-                            self._is_hiragana(furigana[0]) or self._is_katakana(furigana[0])):
-                        base_len = len(furigana)
+                    # 1. Look for the last normal space in the buffer.
+                    # 2. Everything after that space is the Base.
+                    # 3. Everything before that space is Pre-Text.
+                    # 4. The space itself is discarded (delimiter).
+
+                    space_idx = buffer.rfind(' ')
+
+                    if space_idx != -1:
+                        pre_text = buffer[:space_idx]
+                        base_text = buffer[space_idx + 1:]
                     else:
-                        lookback_idx = len(buffer) - 1
-                        if len(furigana) > 0:
-                            f_first = furigana[0]
-                            if self._is_hiragana(f_first) or self._is_katakana(f_first):
-                                prev_char = buffer[lookback_idx] if lookback_idx >= 0 else None
-                                if self._is_katakana(f_first) and prev_char and not self._is_kanji(prev_char):
-                                    while lookback_idx >= 0:
-                                        c = buffer[lookback_idx]
-                                        if self._is_hiragana(c):
-                                            base_len += 1;
-                                            lookback_idx -= 1
-                                        elif c.isspace():
-                                            prev_idx = lookback_idx - 1
-                                            if prev_idx >= 0 and self._is_hiragana(buffer[prev_idx]):
-                                                base_len += 1;
-                                                lookback_idx -= 1
-                                            else:
-                                                break
-                                        else:
-                                            break
-                                else:
-                                    while lookback_idx >= 0:
-                                        c = buffer[lookback_idx]
-                                        if self._is_kanji(c):
-                                            base_len += 1;
-                                            lookback_idx -= 1
-                                        elif c.isspace():
-                                            prev_idx = lookback_idx - 1
-                                            if prev_idx >= 0 and self._is_kanji(buffer[prev_idx]):
-                                                base_len += 1;
-                                                lookback_idx -= 1
-                                            else:
-                                                break
-                                        else:
-                                            break
+                        # No space found? The whole buffer is the base (e.g. start of line).
+                        pre_text = ""
+                        base_text = buffer
 
-                            elif self._is_kanji(f_first):
-                                while lookback_idx >= 0:
-                                    c = buffer[lookback_idx]
-                                    if self._is_katakana(c):
-                                        base_len += 1;
-                                        lookback_idx -= 1
-                                    elif c.isspace():
-                                        prev_idx = lookback_idx - 1
-                                        if prev_idx >= 0 and self._is_katakana(buffer[prev_idx]):
-                                            base_len += 1;
-                                            lookback_idx -= 1
-                                        else:
-                                            break
-                                    else:
-                                        break
-
-                    if base_len > 0 and base_len <= len(buffer):
-                        pre_text = buffer[:-base_len]
+                    # Only create Ruby if we actually have base text
+                    # (This prevents ' (text)' with a leading space from breaking)
+                    if base_text:
                         if pre_text:
                             results.append(
                                 Fragment(text=pre_text, calculated_style=style, applied_style_ids=["VTT_TEXT"]))
-                        base_text = buffer[-base_len:]
+
                         results.append(Fragment(
                             text=furigana,
                             ruby_base=base_text,
@@ -1127,11 +1104,8 @@ class WebVTTIngester:
                             applied_style_ids=["VTT_AUTO_RUBY"]
                         ))
                         buffer = ""
-                    else:
-                        buffer += text[i:close_idx + 1]
-                    i = close_idx + 1
-                    continue
-
+                        i = close_idx + 1
+                        continue
             buffer += char
             i += 1
 

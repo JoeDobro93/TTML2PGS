@@ -143,7 +143,7 @@ class Style:
 
             outline_enabled=True,
             outline_color="#000000", #black outline
-            outline_width=1.5,
+            outline_width=3.0,
             outline_unit="px",
 
             shadow_enabled=True,

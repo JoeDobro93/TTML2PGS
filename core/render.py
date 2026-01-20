@@ -610,7 +610,7 @@ class HtmlRenderer:
 
         # Force 64 steps for everything.
         # This ensures even thin lines on small text (furigana) are buttery smooth.
-        steps = 16
+        steps = 32
         # print(f"[RENDER] {steps} steps")
 
         if use_outline and o_width and o_color:

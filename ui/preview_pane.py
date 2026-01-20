@@ -49,14 +49,14 @@ class PreviewPane(QWidget):
         ar_layout.addWidget(QLabel("Aspect Ratio:"))
 
         self.spin_ar_num = QDoubleSpinBox()
-        self.spin_ar_num.setRange(0.01, 1000.0)
+        self.spin_ar_num.setRange(0.01, 10000.0)
         self.spin_ar_num.setDecimals(3)
         self.spin_ar_num.setSingleStep(0.01)
         self.spin_ar_num.setValue(16.0)
         self.spin_ar_num.valueChanged.connect(self.update_background_layer)
 
         self.spin_ar_den = QDoubleSpinBox()
-        self.spin_ar_den.setRange(0.01, 1000.0)
+        self.spin_ar_den.setRange(0.01, 10000.0)
         self.spin_ar_den.setDecimals(3)
         self.spin_ar_den.setSingleStep(0.01)
         self.spin_ar_den.setValue(9.0)

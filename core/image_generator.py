@@ -96,6 +96,29 @@ class ImageGenerator:
             "color": {"r": 0, "g": 0, "b": 0, "a": 0}
         })
 
+    def get_image_bytes(self, html_content: str) -> bytes:
+        """
+        OPTIMIZED: Injects HTML via JS and returns raw PNG bytes.
+        Does NOT save to disk.
+        """
+        # 1. Fast Injection (Bypasses URL parsing)
+        self.driver.execute_script(
+            "document.open(); document.write(arguments[0]); document.close();",
+            html_content
+        )
+
+        # 2. Smart Wait for Fonts
+        try:
+            self.driver.execute_async_script("""
+                var callback = arguments[arguments.length - 1];
+                document.fonts.ready.then(callback);
+            """)
+        except Exception:
+            time.sleep(0.02)
+
+        # 3. Return bytes directly from RAM
+        return self.driver.get_screenshot_as_png()
+
     def render_html_to_png(self, html_content: str, output_path: str):
         """
         OPTIMIZED: Uses Data URIs to avoid disk I/O and checks document.fonts.ready
