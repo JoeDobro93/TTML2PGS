@@ -749,7 +749,7 @@ class WebVTTIngester:
         )
 
         payload = "\n".join(lines[arrow_idx + 1:])
-        self._parse_payload(payload, cue.fragments, project.styles, base_style)
+        self._parse_payload(payload, cue.fragments, project.styles, base_style, project.language)
 
         # If sanitization removed all text (e.g. it was just metadata),
         # fragments will be empty. We simply return early to drop this cue.
@@ -924,7 +924,7 @@ class WebVTTIngester:
         if len(parts) == 3: return int((int(parts[0]) * 60 + int(parts[1])) * 1000 + int(parts[2]))
         return 0
 
-    def _parse_payload(self, text, fragments, styles, base_style):
+    def _parse_payload(self, text, fragments, styles, base_style, language="en"):
         tokens = VTT_TAG_RE.split(text)
 
         # Stack always starts with the base style
@@ -1040,7 +1040,7 @@ class WebVTTIngester:
                         ruby_base_buffer += token
                     i += 1
                 else:
-                    processed_frags = self._parse_flattened_ruby(token, current_style)
+                    processed_frags = self._parse_flattened_ruby(token, current_style, language)
                     fragments.extend(processed_frags)
                     i += 1
 
@@ -1053,7 +1053,7 @@ class WebVTTIngester:
     def _is_katakana(self, char):
         return 0x30A0 <= ord(char) <= 0x30FF or char == 'ー'
 
-    def _parse_flattened_ruby(self, text: str, style: Style) -> List[Fragment]:
+    def _parse_flattened_ruby(self, text: str, style: Style, language: str) -> List[Fragment]:
         results = []
         buffer = ""
 
@@ -1069,7 +1069,7 @@ class WebVTTIngester:
                 i += 1
                 continue
 
-            if char == '(':
+            if language == "ja" and char == '(':
                 close_idx = text.find(')', i)
                 if close_idx != -1:
                     furigana = text[i + 1:close_idx]

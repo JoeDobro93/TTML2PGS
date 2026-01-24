@@ -267,35 +267,25 @@ class BdnComposer:
         ET.SubElement(desc, "Name").text = "TTML2PGS Export"
         ET.SubElement(desc, "Language", Code=self.project.language or "und")
 
-        # 1. Determine Input Dimensions
-        if self.target_resolution:
-            in_w, in_h = self.target_resolution
-        else:
-            in_w, in_h = self.project.width, self.project.height
+        std_w = self.target_resolution[0]
+        std_h = self.target_resolution[1]
 
-        # 2. Determine Closest Standard Output (Container)
-        # Standards: 480p(720x480), 576p(720x576), 720p(1280x720), 1080p(1920x1080)
-        if in_h <= 480:
-            std_w, std_h, fmt = 720, 480, "480p"
-        elif in_h <= 576:
-            std_w, std_h, fmt = 720, 576, "576p"
-        elif in_h <= 720:
-            std_w, std_h, fmt = 1280, 720, "720p"
-        else:
-            std_w, std_h, fmt = 1920, 1080, "1080p"
+        # In the new logic, there are no offsets.
+        # The image is the full frame (or exactly the size of the video).
+        offset_x = 0
+        offset_y = 0
 
-        print(f"[DEBUG] BdnComposer: Mapping {in_w}x{in_h} -> Standard {fmt} ({std_w}x{std_h})")
+        # Construct Description
+        desc = ET.SubElement(root, "Description")
+        name = self.project.initial_style.id if self.project.initial_style else "Default"
+        ET.SubElement(desc, "Name", Title=name, Content="")
 
-        # 3. Calculate Centering Offsets (Letterboxing/Pillarboxing)
-        offset_x = (std_w - in_w) // 2
-        offset_y = (std_h - in_h) // 2
-
-        if offset_x != 0 or offset_y != 0:
-            print(f"[DEBUG] BdnComposer: Applying Offset X={offset_x}, Y={offset_y}")
-
-            # 4. Write Header
         fps_str = f"{self.tgt_fps_float:.3f}".rstrip('0').rstrip('.')
-        ET.SubElement(desc, "Format", VideoFormat=fmt, FrameRate=fps_str, DropFrame="False")
+
+        # CHANGED: Write 'Resolution' instead of 'VideoFormat'
+        # This allows non-standard resolutions (e.g. 1920x803)
+        res_str = f"{std_w}x{std_h}"
+        ET.SubElement(desc, "Format", Resolution=res_str, FrameRate=fps_str, DropFrame="False")
 
         events_elem = ET.SubElement(root, "Events")
 

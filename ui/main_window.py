@@ -288,9 +288,45 @@ class MainWindow(QMainWindow):
         offset_ms = config.get('offset_ms', 0)
         active_ids = None
 
-        # 1. Output Resolution: ALWAYS 1920x1080 (HD)
-        viewport_res = (1920, 1080) # TODO: Implement flexible implementation
+        # 1. Output Resolution
+        # Defaults
+        default_res = (1920, 1080)
+        viewport_res = default_res
 
+        # Retrieve settings
+        use_video_dims = overrides.get('use_video_dims', False)
+        scale_to_hd = overrides.get('scale_to_hd', False)
+
+        # Get Video Dimensions from Job Config (detected in FilesPane)
+        video_res = config.get('target_res')  # e.g. (3840, 1606)
+
+        if use_video_dims and video_res:
+            vw, vh = video_res
+
+            if scale_to_hd:
+                # SCALING LOGIC: Fit inside 1920x1080 maintaining AR
+                # Calculate scale factor
+                scale_x = 1920 / vw
+                scale_y = 1080 / vh
+                scale = min(scale_x, scale_y)
+
+                # Apply scale
+                new_w = int(round(vw * scale))
+                new_h = int(round(vh * scale))
+
+                # Ensure even dimensions (PGS requirement)
+                #if new_w % 2 != 0: new_w -= 1
+                #if new_h % 2 != 0: new_h -= 1
+
+                viewport_res = (new_w, new_h)
+                print(f"[RES] Scaling {vw}x{vh} -> {viewport_res} (Factor: {scale:.4f})")
+            else:
+                # USE RAW VIDEO DIMS
+                viewport_res = (vw, vh)
+                print(f"[RES] Using Source Video Dims: {viewport_res}")
+        else:
+            # DEFAULT 1080p
+            viewport_res = (1920, 1080)
 
         # 2. Content Resolution: Determines where text sits (Layout)
         original_res = config.get('target_res', (1920, 1080))

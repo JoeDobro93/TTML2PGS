@@ -342,6 +342,29 @@ class SettingsPane(QWidget):
         self.spin_alpha.setValue(1.0)
         layout.addRow("Global Opacity:", self.spin_alpha)
 
+        self.chk_use_video_dims = QCheckBox("Use Video Dimensions")
+        self.chk_use_video_dims.setToolTip(
+            "If checked, the output resolution will match the source video exactly (or scaled),\ninstead of forcing a 1920x1080 canvas.")
+        self.chk_use_video_dims.setChecked(False)
+        apply_grey_style(self.chk_use_video_dims)
+        self.chk_use_video_dims.toggled.connect(self.update_dimension_states)
+        self.chk_use_video_dims.toggled.connect(self.emit_change)
+        layout.addRow(self.chk_use_video_dims)
+
+        self.chk_scale_to_hd = QCheckBox("Scale to HD")
+        self.chk_scale_to_hd.setToolTip(
+            "If checked, scales the video resolution to fit within 1920x1080\nwhile maintaining aspect ratio. (Requires 'Use Video Dimensions')")
+        self.chk_scale_to_hd.setChecked(True)
+        self.chk_scale_to_hd.setEnabled(False)  # Default Disabled
+        apply_grey_style(self.chk_scale_to_hd)
+        self.chk_scale_to_hd.toggled.connect(self.emit_change)
+
+        # Indent "Scale to HD" slightly to show hierarchy
+        scale_layout = QHBoxLayout()
+        scale_layout.addSpacing(20)
+        scale_layout.addWidget(self.chk_scale_to_hd)
+        layout.addRow(scale_layout)
+
         self.chk_force_16_9 = QCheckBox("Force 16:9 Layout (Ignore Video AR)")
         self.chk_force_16_9.setToolTip(
             "If checked, treats the source as 16:9. \nIf unchecked (Default), correctly pillars 4:3 content inside the 16:9 HD frame.")
@@ -433,6 +456,16 @@ class SettingsPane(QWidget):
                     w.stateChanged.connect(self.emit_change)
                 except:
                     w.currentTextChanged.connect(self.emit_change)
+
+    def update_dimension_states(self, checked):
+        """Logic: Use Video Dims disables Force 16:9 and enables Scale to HD."""
+        self.chk_scale_to_hd.setEnabled(checked)
+
+        # Force 16:9 is mutually exclusive with Use Video Dims
+        self.chk_force_16_9.setEnabled(not checked)
+
+        # Visual refresh for the grey/white styling
+        self.update_override_visuals()
 
     def setup_initials_ui(self):
         layout = QVBoxLayout(self.initials_tab)
@@ -686,6 +719,8 @@ class SettingsPane(QWidget):
                          [self.chk_shadow_enable, self.spin_shadow_x, self.spin_shadow_y, self.spin_shadow_blur,
                           self.btn_shadow_color, self.lbl_shadow_swatch, self.spin_shadow_alpha])
 
+        set_visual_state(self.chk_use_video_dims.isChecked(), [self.chk_scale_to_hd])
+
         set_visual_state(self.chk_override_ar.isChecked(), [self.spin_ar_num, self.spin_ar_den])
 
     def toggle_auto_color_state(self, checked):
@@ -773,6 +808,9 @@ class SettingsPane(QWidget):
 
             "auto_hdr_color": self.btn_auto_hdr.text(),
             "auto_hdr_alpha": hdr_alpha,
+
+            "use_video_dims": self.chk_use_video_dims.isChecked(),
+            "scale_to_hd": self.chk_scale_to_hd.isChecked(),
 
             "force_16_9": self.chk_force_16_9.isChecked(),
 

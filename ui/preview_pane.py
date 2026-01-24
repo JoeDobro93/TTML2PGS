@@ -171,7 +171,9 @@ class PreviewPane(QWidget):
             'auto_hdr_color', 'auto_hdr_alpha',
             'force_16_9', 'remux_enabled',
             'override_ar_enabled', 'ar_num', 'ar_den',
-            'cleanup_enabled', 'move_enabled', 'web_view'
+            'cleanup_enabled', 'move_enabled', 'web_view',
+            "use_video_dims",
+            "scale_to_hd"
         ]
 
         # We must remove 'window_bg' AND the new Auto-Color keys,

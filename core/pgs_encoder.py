@@ -337,11 +337,28 @@ class PgsEncoder:
         fmt = root.find("Description/Format")
         fps_str = fmt.get("FrameRate", "23.976")
         fps = float(fps_str)
-        vid_fmt = fmt.get("VideoFormat", "1080p")
-        if "720" in vid_fmt: w, h = 1280, 720
-        elif "480" in vid_fmt: w, h = 720, 480
-        elif "576" in vid_fmt: w, h = 720, 576
-        else: w, h = 1920, 1080
+
+        res_str = fmt.get("Resolution")
+        w, h = 1920, 1080  # Default
+
+        if res_str and "x" in res_str:
+            try:
+                parts = res_str.split("x")
+                w = int(parts[0])
+                h = int(parts[1])
+            except:
+                print(f"[PGS] Warning: Could not parse Resolution '{res_str}'. Using default.")
+        else:
+            # Fallback: Use old 'VideoFormat' Logic
+            vid_fmt = fmt.get("VideoFormat", "1080p")
+            if "720" in vid_fmt:
+                w, h = 1280, 720
+            elif "480" in vid_fmt:
+                w, h = 720, 480
+            elif "576" in vid_fmt:
+                w, h = 720, 576
+            else:
+                w, h = 1920, 1080
 
         video_format = {'fps': fps, 'w': w, 'h': h}
         events = []
