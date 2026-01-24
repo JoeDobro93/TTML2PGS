@@ -346,13 +346,23 @@ class FilesPane(QWidget):
             self.project_loaded.emit(project, row_data['target_fps'], row_data.get('is_hdr', False), row_data['target_res'])
 
     def _calc_output(self, sub_path, vid_path, project):
-        source = vid_path if vid_path else sub_path
+        # 1. Always use the subtitle file as the naming source
+        source = sub_path
+
         base = os.path.splitext(os.path.basename(source))[0]
         lang = project.language or "und"
-        if base.endswith(f".{lang}"):
-            base = base.rsplit(f".{lang}", 1)[0]
 
-        filename = f"{base}.{lang}.sup"
+        # 2. Check if the language code is already properly inside the filename
+        #    We look for ".ja." (middle) or ".ja" (end) to avoid false positives like "ninja"
+        lang_tag = f".{lang}"
+
+        if base.endswith(lang_tag) or (f"{lang_tag}." in base):
+            # Language is already there, just switch extension
+            filename = f"{base}.sup"
+        else:
+            # Language missing, append it
+            filename = f"{base}.{lang}.sup"
+
         directory = os.path.dirname(vid_path) if vid_path else os.path.dirname(sub_path)
         return filename, directory
 
