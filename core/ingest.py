@@ -125,17 +125,22 @@ class TTMLIngester:
 
     def _detect_lang_from_filename(self, path: str) -> str:
         """
-        Parses [filename].[lang].[ext].
-        Validates against VALID_LANG_CODES to avoid false positives like '1080p'.
-        """
+                Parses [filename].[lang].[ext] or [filename].[lang].[tag].[ext].
+                Scans backwards from the extension to find a valid language code.
+                """
         try:
-            # Split by dots
             parts = path.lower().split('.')
-            # Must have at least 3 parts: name.lang.ext
-            if len(parts) >= 3:
-                potential_code = parts[-2]  # Get second to last item
-                if potential_code in VALID_LANG_CODES:
-                    return VALID_LANG_CODES[potential_code]
+            if len(parts) < 2:
+                return ""
+
+            # Look at up to 3 parts before the extension
+            # e.g. movie.ja.forced.vtt -> checks 'forced' (no), then 'ja' (yes)
+            limit = max(0, len(parts) - 5)
+
+            for i in range(len(parts) - 2, limit - 1, -1):
+                code = parts[i]
+                if code in VALID_LANG_CODES:
+                    return VALID_LANG_CODES[code]
         except Exception:
             pass
         return ""
@@ -690,11 +695,22 @@ class WebVTTIngester:
         return project
 
     def _detect_lang_from_filename(self, path: str) -> str:
-        parts = path.lower().split('.')
-        if len(parts) >= 3:
-            potential_code = parts[-2]
-            if potential_code in VALID_LANG_CODES:
-                return VALID_LANG_CODES[potential_code]
+        """
+        Parses [filename].[lang].[ext].
+        Scans backwards to correctly identify language even with 'forced' tags.
+        """
+        try:
+            parts = path.lower().split('.')
+            if len(parts) < 2: return ""
+
+            # Check up to 3 tokens before the extension
+            limit = max(0, len(parts) - 5)
+            for i in range(len(parts) - 2, limit - 1, -1):
+                code = parts[i]
+                if code in VALID_LANG_CODES:
+                    return VALID_LANG_CODES[code]
+        except Exception:
+            pass
         return ""
 
     def _parse_css(self, block, project):

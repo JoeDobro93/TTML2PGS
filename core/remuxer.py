@@ -46,6 +46,17 @@ class Remuxer:
             print("[REMUX] mkvmerge not found. Falling back to ffmpeg (PGS support may be flaky).")
             return self._remux_with_ffmpeg(video_path, subtitles)
 
+    def _is_forced(self, filename: str) -> bool:
+        """Checks if filename implies a forced subtitle."""
+        name = os.path.basename(filename).lower()
+        # matches "movie.forced.ja.sup" or "movie.ja.forced.sup"
+        if ".forced." in name:
+            return True
+        # matches "movie.forced" (rare for files with extensions, but good safety)
+        if name.endswith(".forced"):
+            return True
+        return False
+
     def _remux_with_mkvmerge(self, video_path: str, subtitles: list, progress_callback=None) -> bool:
         """Robust remuxing using MKVToolNix."""
         directory = os.path.dirname(video_path)
@@ -70,10 +81,21 @@ class Remuxer:
             lang = sub.get('lang', 'und')
             title = sub.get('title', '')
 
+            is_forced = self._is_forced(path)
+
             # Flags apply to the FOLLOWING source file
             cmd.extend(["--language", f"0:{lang}"])
+
             if title:
                 cmd.extend(["--track-name", f"0:{title}"])
+
+            if is_forced:
+                # 0 is the track ID within the .sup file
+                cmd.extend(["--forced-display-flag", "0:yes"])
+            else:
+                # Explicitly set no to avoid accidental inheritance
+                cmd.extend(["--forced-display-flag", "0:no"])
+
             cmd.append(path)
 
         try:
@@ -175,6 +197,11 @@ class Remuxer:
             cmd.extend([f"-metadata:s:s:{i}", f"language={lang}"])
             if sub.get('title'):
                 cmd.extend([f"-metadata:s:s:{i}", f"title={sub['title']}"])
+
+            if self._is_forced(sub['path']):
+                cmd.extend([f"-disposition:s:s:{i}", "forced"])
+            else:
+                cmd.extend([f"-disposition:s:s:{i}", "0"])
 
         cmd.extend(["-c:v", "copy", "-c:a", "copy"])
         cmd.append(target_output)
