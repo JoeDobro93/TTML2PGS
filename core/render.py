@@ -175,34 +175,37 @@ class HtmlRenderer:
 
   /* RUBY CONFIGURATION */
   ruby {{
-    ruby-position: over;
-    ruby-align: space-between;
-    paint-order: stroke fill;
+    display: inline-block;       /* Keeps base text solid/compact */
+    position: relative;          /* Anchors the RT */
     line-height: 1.0; 
+    text-indent: 0;
+    vertical-align: baseline; /* Aligns base with neighbor baselines */
+    margin: 0;                   /* Resets, overridden by Python for spacing */
   }}
   
   rb {{
-    display: ruby-base;
-    position: relative;
-    z-index: 1; 
+    display: inline;             /* Behaves like standard text */
+    white-space: nowrap;         /* Keep Base text together */
   }}
 
   rt {{
-    font-size: 0.5em;
-    /* text-align: center; */
-    paint-order: stroke fill;
-    position: relative;
-    z-index: 0; /* Sit behind the base text */
-    top: var(--rt-top, 0);
-    line-height: var(--rt-lh, 1.0);
+    display: block;
+    position: absolute;
+    pointer-events: none;
     
-    -webkit-text-stroke: calc(var(--sw) * 1.0 var(--sc);
-
-    /* old outline method Boost outline thickness for tiny text to prevent jagged/steppy edges */
-    /* --sw-scale: 1.5; */
-
-    /* NOTE: The text-shadow property is generated dynamically in Python 
-       and injected inline, so we don't define it here anymore. */
+    font-size: 0.5em;
+    line-height: 1.0;
+    
+    /* VISUALS */
+    white-space: nowrap;         /* Allow spillover (no wrapping) */
+    
+    /* ALIGNMENT: */
+    text-align: justify;
+    text-align-last: justify;
+    
+    /* STROKE */
+    -webkit-text-stroke: calc(var(--sw) * 0.85) var(--sc);
+    paint-order: stroke fill;
   }}
 
 </style>
@@ -502,45 +505,104 @@ class HtmlRenderer:
                 # Ensure semicolon exists
                 base_style = style_css + ";" if style_css and not style_css.endswith(";") else style_css
 
-                # --- CONFIGURATION ---
-                # 1. Container Line-Height:
-                #    Force the Base text box to be exactly 1.0 (snug).
-                #    This removes the "Buffer" above the Kanji.
-                container_lh = "line-height: 1.0;"
+                # --- DIMENSIONS ---
+                gap_size = "0.05em"
+                margin_size = "0.6em"  # 0.5 (Text) + 0.1 (Gap)
 
-                # 2. RT Line-Height (--rt-lh):
-                #    Force the Ruby text to be exactly 1.0 (snug relative to ITSELF).
-                #    This stops it from inheriting the huge 60px height of the parent.
-                #    We use "1.0" for Horizontal. For Vertical, we usually keep "1.0" or "normal".
-                rt_lh_val = "1.0"
+                # --- JUSTIFICATION MATH (1-2-1 Spacing Rule) ---
+                # We calculate padding to balance short ruby text.
+                # Ruby Char = 0.5 width relative to Base Char = 1.0 width
 
-                # 3. RT Offset (--rt-top):
-                #    We keep your visual nudge to handle Noto Sans ascenders.
-                # NOTE: moving this to 1.0 from 0.0 pushes ruby text *down* however this doesn't work with Noto font
-                #       so it doesn't really help since it just breaks fonts like Arial and does nothing for Noto
-                rt_top_val = "0.0em"
+                base_len = len(frag.ruby_base)
+                ruby_len = len(frag.text)
 
-                # Combine everything:
-                # - line-height: 1.0  -> Clamps the base
-                # - display: ruby     -> Enforces proper stacking
-                # - --rt-lh: 1.0      -> Clamps the ruby text height
-                # - --rt-top: 0.75em  -> Pushes ruby text down visually
-                ruby_style = (f"{base_style} {container_lh} display: ruby; "
-                              f"ruby-position: over; --rt-top: {rt_top_val}; --rt-lh: {rt_lh_val};")
+                # Determine Layout Mode: Overflow (Center) vs Underflow (Justify)
+                is_overflow = False
+                justify_padding = "0"
 
-                inner_content = f'<rb>{ruby_base}</rb><rt>{text}</rt>'
+                # Avoid division by zero
+                if base_len > 0 and ruby_len > 0:
+                    base_width_units = base_len * 1.0
+                    ruby_width_units = ruby_len * 0.5
+
+                    if ruby_width_units > base_width_units or ruby_len == 1:
+                        # Case 1: Overflow or single character -> Needs Centering
+                        is_overflow = True
+                    elif ruby_width_units < base_width_units:
+                        # Case 2: Underflow -> Needs Padding & Justify
+                        # (Reuse your previous calculation logic)
+                        free_space_units = base_width_units - ruby_width_units
+                        ratio_free = free_space_units / base_width_units
+                        # margin_ratio = ratio_free / (ruby_len + 1) #old version, edge and interchar padding equal
+                        margin_ratio = ratio_free / (ruby_len * 2)
+                        justify_padding = f"{margin_ratio * 100:.4f}%"
+
+                # --- HORIZONTAL LAYOUT ---
+                # Container: Add Margin-Top to push previous lines up.
+                # RT: Position at Bottom 100% (Top of base) + Gap.
+                #     Center horizontally (left 50%, translate -50%).
+                ruby_css = (
+                    f"{base_style} display: inline-block; position: relative; line-height: 1.0; "
+                    f"margin-top: {margin_size};"
+                )
+
+                if is_overflow:
+                    # OVERFLOW: Uncap width, Center Absolute
+                    rt_css = (
+                        f"left: 50%; width: max-content; "
+                        f"top: auto; bottom: calc(100% + {gap_size}); "
+                        f"transform: translateX(-50%); "
+                        f"text-align: center;"
+                    )
+                else:
+                    # UNDERFLOW: Match width, Justify
+                    rt_css = (
+                        f"left: 0; width: 100%; "
+                        f"padding-left: {justify_padding}; padding-right: {justify_padding}; "
+                        f"box-sizing: border-box; "
+                        f"top: auto; bottom: calc(100% + {gap_size}); "
+                        f"text-align: justify; text-align-last: justify;"
+                    )
+
+                # --- VERTICAL LAYOUT ---
+                if is_vertical:
+                    # Container: Add Margin-Right to push previous lines (visually Right) away.
+                    ruby_css = (
+                        f"{base_style} display: inline-block; position: relative; line-height: 1.0; "
+                        f"margin-right: {margin_size}; margin-top: 0;"
+                    )
+
+                    # RT: Sit on Right (occupying the margin), Match Height (for justify)
+                    if is_overflow:
+                        # OVERFLOW: Uncap height, Center Absolute Vertical
+                        rt_css = (
+                            f"top: 50%; height: max-content; "
+                            f"bottom: auto; left: calc(100% + {gap_size}); "
+                            f"transform: translateY(-50%); "
+                            f"text-align: center;"
+                        )
+                    else:
+                        # UNDERFLOW: Match height, Justify Vertical
+                        rt_css = (
+                            f"top: 0; height: 100%; "
+                            f"padding-top: {justify_padding}; padding-bottom: {justify_padding}; "
+                            f"box-sizing: border-box; "
+                            f"bottom: auto; left: calc(100% + {gap_size}); "
+                            f"text-align: justify; text-align-last: justify;"
+                        )
+
+                inner_content = f'<rb>{ruby_base}</rb><rt style="{rt_css}">{text}</rt>'
 
                 if char_transform:
-                    # Wrapper for Skew
+                    # Wrapper for Skew/Rotation transforms
                     parts.append(
                         f'<span style="display: inline-block; {char_transform}">'
-                        f'<ruby class="cap" style="{ruby_style}">{inner_content}</ruby>'
+                        f'<ruby class="cap" style="{ruby_css}">{inner_content}</ruby>'
                         f'</span>'
                     )
                 else:
-                    # Standard
                     parts.append(
-                        f'<ruby class="cap" style="{ruby_style}">{inner_content}</ruby>'
+                        f'<ruby class="cap" style="{ruby_css}">{inner_content}</ruby>'
                     )
 
             else:
