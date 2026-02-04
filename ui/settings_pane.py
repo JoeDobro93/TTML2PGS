@@ -104,8 +104,8 @@ class SettingsPane(QWidget):
         self.cmb_presets = QComboBox()
         # Full Config Presets
         self.preset_map = {
-            "Standard (SDR)": ("#E5E5E5", 1.0),
-            "Cinema (SDR)": ("#E0E0E0", 1.0),
+            "Standard (SDR)": ("#E5E5E5", 0.90),
+            "Cinema (SDR)": ("#E0E0E0", 0.90),
             "HDR (Standard)": ("#B6B6B6", 0.90),
             "HDR (OLED Safe)": ("#808080", 0.90)
         }
@@ -124,7 +124,7 @@ class SettingsPane(QWidget):
 
         # Define Color Presets (Name -> (Hex, Alpha))
         self.color_presets = {
-            "SDR White 01": ("#E5E5E5", 1.0),
+            "SDR White 01": ("#E5E5E5", 0.90),
             "SDR Yellow 01": ("#FFEE8C", 1.0),
             "HDR Grey 01": ("#A1A1A1", 0.90),
             "HDR Grey 02": ("#808080", 0.90),
