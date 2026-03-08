@@ -4,7 +4,9 @@ import sys
 import traceback
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QSplitter,
                              QProgressBar, QLabel, QStatusBar, QToolBar, QSpinBox,
-                             QPushButton, QMessageBox, QApplication)
+                             QPushButton, QMessageBox, QApplication, QButtonGroup,
+                             QRadioButton, QLineEdit, QFileDialog, QHBoxLayout,
+                             QSizePolicy)
 from PyQt6.QtCore import Qt, QThread
 
 from .cues_pane import CuesPane
@@ -13,6 +15,7 @@ from .preview_pane import PreviewPane
 from .settings_pane import SettingsPane
 from .workers import PipelineWorker, RemuxWorker
 from .queue_window import QueueWindow
+from . import app_settings
 from core.remuxer import Remuxer
 
 
@@ -21,6 +24,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("TTML2PGS Ultimate")
         self.resize(1600, 1000)
+
+        # --- LOAD PERSISTENT SETTINGS ---
+        self._app_settings = app_settings.load()
 
         # --- TOOLBAR ---
         toolbar = QToolBar("Main")
@@ -36,6 +42,9 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.spin_src_fps_den)
 
         toolbar.addSeparator()
+
+        # --- TEMP FILES SECTION ---
+        self._build_temp_files_toolbar(toolbar)
 
         self.spin_tgt_fps_num = QSpinBox();
         self.spin_tgt_fps_num.setRange(1, 100000)
@@ -114,6 +123,81 @@ class MainWindow(QMainWindow):
 
         self.pending_single_remux = None
         self.batch_remux_queue = []  # Stores {'video': path, 'sup': path, 'lang': code}
+
+    def _build_temp_files_toolbar(self, toolbar):
+        """Add the 'Temp Files' controls to the toolbar."""
+        toolbar.addWidget(QLabel(" Temp Files: "))
+
+        self._radio_grp = QButtonGroup(self)
+        self._rb_match = QRadioButton("Match Source")
+        self._rb_custom = QRadioButton("Custom:")
+        self._rb_match.setToolTip(
+            "Temp image files are written to a subfolder inside the source subtitle/video directory (original behaviour).")
+        self._rb_custom.setToolTip("Temp image files are written to a fixed folder of your choice.")
+
+        toolbar.addWidget(self._rb_match)
+        toolbar.addWidget(self._rb_custom)
+        self._radio_grp.addButton(self._rb_match)
+        self._radio_grp.addButton(self._rb_custom)
+
+        self._lbl_temp_path = QLineEdit()
+        self._lbl_temp_path.setReadOnly(True)
+        self._lbl_temp_path.setPlaceholderText("(same as source)")
+        self._lbl_temp_path.setFixedWidth(240)
+        self._lbl_temp_path.setStyleSheet("color: #aaaaaa;")
+        toolbar.addWidget(self._lbl_temp_path)
+
+        self._btn_browse_temp = QPushButton("Browse…")
+        self._btn_browse_temp.setFixedWidth(70)
+        self._btn_browse_temp.clicked.connect(self._on_browse_temp_dir)
+        toolbar.addWidget(self._btn_browse_temp)
+
+        self._apply_temp_settings_to_ui()
+
+        self._rb_match.toggled.connect(self._on_temp_mode_changed)
+        self._rb_custom.toggled.connect(self._on_temp_mode_changed)
+
+    def _apply_temp_settings_to_ui(self):
+        """Sync toolbar widgets to the current _app_settings state."""
+        mode = self._app_settings.get("temp_dir_mode", "match_source")
+        custom_path = self._app_settings.get("temp_dir_custom", "")
+
+        if mode == "custom":
+            self._rb_custom.setChecked(True)
+            self._lbl_temp_path.setText(custom_path)
+            self._lbl_temp_path.setEnabled(True)
+            self._btn_browse_temp.setEnabled(True)
+        else:
+            self._rb_match.setChecked(True)
+            self._lbl_temp_path.setText("")
+            self._lbl_temp_path.setEnabled(False)
+            self._btn_browse_temp.setEnabled(False)
+
+    def _on_temp_mode_changed(self):
+        """Called when either radio button is toggled."""
+        if self._rb_custom.isChecked():
+            self._app_settings["temp_dir_mode"] = "custom"
+            self._lbl_temp_path.setEnabled(True)
+            self._btn_browse_temp.setEnabled(True)
+        else:
+            self._app_settings["temp_dir_mode"] = "match_source"
+            self._lbl_temp_path.setText("")
+            self._lbl_temp_path.setEnabled(False)
+            self._btn_browse_temp.setEnabled(False)
+        app_settings.save(self._app_settings)
+
+    def _on_browse_temp_dir(self):
+        """Open a folder picker and update the custom temp dir."""
+        start = self._app_settings.get("temp_dir_custom", "") or os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(self, "Select Temp Files Folder", start)
+        if folder:
+            self._app_settings["temp_dir_custom"] = folder
+            self._lbl_temp_path.setText(folder)
+            app_settings.save(self._app_settings)
+
+    def _resolve_temp_dir(self, source_path: str) -> str:
+        """Return the directory to use for temp files for the given job."""
+        return app_settings.resolve_temp_dir(self._app_settings, source_path)
 
     def _apply_auto_color(self, overrides, is_hdr):
         """Resolves Auto-Color logic into specific Global Color/Alpha overrides."""
@@ -263,6 +347,13 @@ class MainWindow(QMainWindow):
         self.queue_window.update_progress(0)
 
         config = self.current_job_config
+
+        # --- OVERRIDE out_dir WITH TEMP DIR SETTING ---
+        source_for_temp = config.get('sub_path') or config.get('video_path', '')
+        resolved_temp = self._resolve_temp_dir(source_for_temp)
+        job_name = os.path.splitext(os.path.basename(source_for_temp))[0]
+        config['out_dir'] = os.path.join(resolved_temp, f"_subbles_tmp_{job_name}")
+        print(f"[TEMP] Temp dir for this job: {config['out_dir']}")
 
         # --- AUTO-COLOR LOGIC START ---
         # Get base settings
@@ -501,6 +592,9 @@ class MainWindow(QMainWindow):
                         shutil.rmtree(p_slices)
                     if os.path.exists(p_manifest):
                         os.remove(p_manifest)
+                    # Remove the job temp folder itself if now empty
+                    if os.path.exists(out_dir) and not os.listdir(out_dir):
+                        os.rmdir(out_dir)
                     print(f"[CLEANUP] Temp files removed for {self.current_sub_name}")
                 except Exception as e:
                     print(f"[CLEANUP] Failed to remove temp files: {e}")
