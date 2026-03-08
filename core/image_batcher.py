@@ -9,12 +9,22 @@ import os
 import json
 import time
 import io
+import threading
+import concurrent.futures
 from typing import Optional, List, Dict
 from PIL import Image
 
 from .models import SubtitleProject
 from .render import HtmlRenderer
 from .image_generator import ImageGenerator
+
+# Minimum number of cues before spinning up multiple Chrome instances.
+# Below this threshold the startup overhead of extra instances costs more than it saves.
+MIN_CUES_FOR_PARALLEL = 8
+
+# Default number of parallel Chrome workers.
+# Each worker is a separate headless Chrome process (~200-300 MB RAM each).
+DEFAULT_NUM_WORKERS = 4
 
 class ImageBatcher:
     def __init__(self, project: SubtitleProject, output_dir: str):
@@ -28,6 +38,8 @@ class ImageBatcher:
         self.target_fps_den = project.fps_den
         self.viewport_res = (1920, 1080)
         self.content_res = (1920, 1080)
+
+        self.num_workers = DEFAULT_NUM_WORKERS
 
         # Style Overrides (Defaults)
         self.override_font_size = False
@@ -148,73 +160,89 @@ class ImageBatcher:
         )
         log_step("Renderer Init", t_renderer_setup)
 
-        manifest_cues = []
         t_start = time.time()
 
+        # Pre-generate all HTML strings up front (pure Python, no I/O).
+        # This moves HTML generation out of the Chrome hot-path entirely.
+        t_html_gen = time.time()
+        print("[BATCHER] Pre-generating HTML for all cues...")
+        html_list = [html_renderer.render_cue_to_html(cue) for cue in process_cues]
+        print(f"[BATCHER] HTML pre-generation done in {time.time() - t_html_gen:.2f}s")
+
+        # Build a flat work list: (global_index, seq_num, filename, img_path, html, cue)
+        # global_index is used to write results back into a pre-allocated list in order.
+        work_items = []
+        for i, (cue, html) in enumerate(zip(process_cues, html_list)):
+            seq_num = i + 1
+            filename = f"cue{seq_num:05d}.png"
+            img_path = os.path.join(self.images_dir, filename)
+            work_items.append((i, seq_num, filename, img_path, html, cue))
+
+        # Decide how many Chrome workers to use.
+        # Use parallel only if there are enough cues to justify the startup overhead.
+        num_workers = self.num_workers if len(work_items) >= MIN_CUES_FOR_PARALLEL else 1
+        num_workers = min(num_workers, len(work_items))  # Never more workers than cues
+        print(f"[BATCHER] Using {num_workers} Chrome worker(s) for {len(work_items)} cues")
+
+        # Pre-allocate the manifest list so threads can write in any order without locking
+        manifest_cues = [None] * len(work_items)
+
+        # Shared progress counter — threads update this atomically via a lock
+        completed_count = [0]  # list so inner function can mutate it (Python 2-safe style)
+        count_lock = threading.Lock()
+
+        def render_chunk(chunk_items):
+            """Worker function: owns one Chrome instance and renders its assigned cues."""
+            with ImageGenerator(self.project, output_resolution=self.viewport_res) as img_gen:
+                for (global_idx, seq_num, filename, img_path, html, cue) in chunk_items:
+                    # Respect cancellation
+                    if cancel_event and cancel_event.is_set():
+                        return
+
+                    # Render via Chrome
+                    png_bytes = img_gen.get_image_bytes(html)
+
+                    # Decode and save (PIL)
+                    with Image.open(io.BytesIO(png_bytes)) as img:
+                        img.save(img_path)
+
+                    # Write result into pre-allocated slot — no lock needed (unique index)
+                    manifest_cues[global_idx] = {
+                        "id": cue.start_ms,
+                        "filename": filename,
+                        "start_ms": cue.start_ms,
+                        "end_ms": cue.end_ms
+                    }
+
+                    # Thread-safe progress update
+                    with count_lock:
+                        completed_count[0] += 1
+                        current = completed_count[0]
+
+                    if current % 10 == 0:
+                        print(f"  Rendered {current}/{len(work_items)}")
+
+                    if progress_callback:
+                        progress_callback(current, len(work_items), f"Rendering {filename}...")
+
+        # Split work across workers using interleaved slicing so each worker gets an
+        # even spread across the full duration rather than a consecutive block.
+        # e.g. 4 workers, 12 cues: worker 0 gets [0,4,8], worker 1 gets [1,5,9], etc.
+        # This means all workers finish at roughly the same time.
+        chunks = [work_items[i::num_workers] for i in range(num_workers)]
+        chunks = [c for c in chunks if c]  # Drop any empty chunks
+
         t_browser_launch = time.time()
-        with ImageGenerator(self.project,output_resolution=self.viewport_res) as img_gen:
-            log_step("Browser Launch", t_browser_launch)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [executor.submit(render_chunk, chunk) for chunk in chunks]
+            concurrent.futures.wait(futures)
 
-            for i, cue in enumerate(process_cues):
-                t_cue_start = time.time()
+            # Re-raise any exceptions from worker threads
+            for f in futures:
+                if f.exception():
+                    raise f.exception()
 
-                # Cancel logic
-                if cancel_event and cancel_event.is_set():
-                    print("Batch Render Cancelled.")
-                    return
-
-                # Naming: cue00001.png
-                # We use a sequential counter for filenames (1-based index)
-                seq_num = i + 1
-                filename = f"cue{seq_num:05d}.png"
-                img_path = os.path.join(self.images_dir, filename)
-
-                # Render HTML
-                html_content = html_renderer.render_cue_to_html(cue)
-
-                # # Generate PNG
-                # img_gen.render_html_to_png(html_content, img_path)
-                # # Apply alpha
-                # if self.global_alpha < 1.0 and self.global_alpha >= 0.0:
-                #     self._apply_global_alpha(img_path, self.global_alpha)
-
-                # Get Raw PNG Bytes (RAM)
-                png_bytes = img_gen.get_image_bytes(html_content)
-
-                with Image.open(io.BytesIO(png_bytes)) as img:
-                    # No alpha math needed here anymore!
-                    img.save(img_path)
-
-                # # Process with PIL in RAM (No Disk I/O yet)
-                # with Image.open(io.BytesIO(png_bytes)) as img:
-                #     img = img.convert("RGBA")
-                #
-                #     # Apply Alpha Calculation in RAM
-                #     if 0.0 <= self.global_alpha < 1.0:
-                #         r, g, b, a = img.split()
-                #         # Multiply existing alpha channel by global_alpha
-                #         new_alpha = a.point(lambda p: int(p * self.global_alpha))
-                #         img.putalpha(new_alpha)
-                #
-                #     # 4. Save to Disk (Once)
-                #     img.save(img_path)
-
-                # C. Collect Metadata (Raw Source Times)
-                manifest_cues.append({
-                    "id": cue.start_ms,
-                    "filename": filename,
-                    "start_ms": cue.start_ms,
-                    "end_ms": cue.end_ms
-                })
-
-                log_step(f"Render {filename}", t_cue_start)
-
-                if seq_num % 10 == 0:
-                    print(f"  Rendered {seq_num}/{len(process_cues)}")
-
-                # Cancel logic
-                if progress_callback:
-                    progress_callback(i + 1, len(process_cues), f"Rendering {filename}...")
+        log_step("Browser Launch + Render", t_browser_launch)
 
         t_end = time.time()
         print(f"Batch Render Complete in {t_end - t_start:.2f}s")

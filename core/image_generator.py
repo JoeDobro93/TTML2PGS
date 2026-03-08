@@ -10,6 +10,7 @@ Uses Selenium + Chrome DevTools Protocol (CDP) to ensure:
 import os
 import tempfile
 import time
+import shutil
 import urllib.parse
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -22,6 +23,7 @@ class ImageGenerator:
     def __init__(self, project: SubtitleProject, output_resolution=None):
         self.project = project
         self.output_resolution = output_resolution
+        self._user_data_dir = None
         self.driver = self._setup_driver()
         self._configure_viewport()
 
@@ -33,6 +35,12 @@ class ImageGenerator:
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--hide-scrollbars")
+
+        # Each instance gets its own isolated temp profile directory so that
+        # parallel Chrome processes don't share state or lock each other out.
+        options.add_argument("--disable-extensions")
+        self._user_data_dir = tempfile.mkdtemp(prefix="subbles_chrome_")
+        options.add_argument(f"--user-data-dir={self._user_data_dir}")
 
         # --- 1. CHECK FOR BUNDLED (OFFLINE) CHROME ---
         # Look for a 'bin' folder in the current working directory
@@ -98,16 +106,13 @@ class ImageGenerator:
 
     def get_image_bytes(self, html_content: str) -> bytes:
         """
-        OPTIMIZED: Injects HTML via JS and returns raw PNG bytes.
-        Does NOT save to disk.
+        Loads HTML via a base64 data URI to avoid Chrome's Trusted Types restriction
+        (enforced from Chrome 143+) which blocks document.write() with arbitrary HTML.
         """
-        # 1. Fast Injection (Bypasses URL parsing)
-        self.driver.execute_script(
-            "document.open(); document.write(arguments[0]); document.close();",
-            html_content
-        )
+        import base64
+        encoded = base64.b64encode(html_content.encode('utf-8')).decode('ascii')
+        self.driver.get(f"data:text/html;base64,{encoded}")
 
-        # 2. Smart Wait for Fonts
         try:
             self.driver.execute_async_script("""
                 var callback = arguments[arguments.length - 1];
@@ -116,7 +121,6 @@ class ImageGenerator:
         except Exception:
             time.sleep(0.02)
 
-        # 3. Return bytes directly from RAM
         return self.driver.get_screenshot_as_png()
 
     def render_html_to_png(self, html_content: str, output_path: str):
@@ -150,6 +154,8 @@ class ImageGenerator:
     def close(self):
         if self.driver:
             self.driver.quit()
+        if self._user_data_dir and os.path.exists(self._user_data_dir):
+            shutil.rmtree(self._user_data_dir, ignore_errors=True)
 
     def __enter__(self):
         return self
