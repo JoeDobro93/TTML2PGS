@@ -113,6 +113,7 @@ class MainWindow(QMainWindow):
 
         self.current_project = None
         self.current_is_hdr = False
+        self.current_video_path = ""
         self.worker = None
         self.job_queue = []
         self.completed_jobs = []
@@ -215,6 +216,23 @@ class MainWindow(QMainWindow):
             overrides['override_color'] = True
         return overrides
 
+    def _calculate_viewport_res(self, overrides, video_res):
+        """
+        Resolve the OUTPUT pixel size that gets fed to the Chrome windows
+        (and therefore the pop-out preview). Mirrors the logic used by
+        process_next_job so the preview matches the final render exactly.
+        """
+        use_video_dims = overrides.get('use_video_dims', False)
+        scale_to_hd = overrides.get('scale_to_hd', False)
+
+        if use_video_dims and video_res:
+            vw, vh = video_res
+            if scale_to_hd:
+                scale = min(1920 / vw, 1080 / vh)
+                return (int(round(vw * scale)), int(round(vh * scale)))
+            return (vw, vh)
+        return (1920, 1080)
+
     # Helper method to calculate content_res based on priority
     def _resolve_content_res(self, overrides, original_res):
         if overrides.get('override_ar_enabled', False):
@@ -231,12 +249,13 @@ class MainWindow(QMainWindow):
             # Priority 3: Native Resolution
             return original_res or (1920, 1080)
 
-    def on_project_loaded(self, project, target_fps, is_hdr=False, content_res=None):
+    def on_project_loaded(self, project, target_fps, is_hdr=False, content_res=None, video_path=""):
         try:
             self.current_project = project
             self.current_is_hdr = is_hdr  # <--- Store State
 
             self.current_content_res = content_res
+            self.current_video_path = video_path or ""
 
             self.spin_src_fps_num.setValue(project.fps_num)
             self.spin_src_fps_den.setValue(project.fps_den)
@@ -248,8 +267,11 @@ class MainWindow(QMainWindow):
             overrides = self._apply_auto_color(overrides, is_hdr)
 
             final_res = self._resolve_content_res(overrides, content_res)
+            viewport_res = self._calculate_viewport_res(overrides, content_res)
 
-            self.preview_pane.set_project(project, overrides, final_res)
+            self.preview_pane.set_project(project, overrides, final_res,
+                                          viewport_res=viewport_res,
+                                          video_path=self.current_video_path)
             self.cues_pane.load_project(project)
 
             self.settings_pane.load_project(project)
@@ -264,8 +286,11 @@ class MainWindow(QMainWindow):
             # Use the stored resolution if available, else default to 1080p
             base_res = getattr(self, 'current_content_res', (1920, 1080))
             final_res = self._resolve_content_res(overrides, base_res)
+            viewport_res = self._calculate_viewport_res(overrides, base_res)
 
-            self.preview_pane.set_project(self.current_project, overrides, final_res)
+            self.preview_pane.set_project(self.current_project, overrides, final_res,
+                                          viewport_res=viewport_res,
+                                          video_path=getattr(self, 'current_video_path', ""))
 
     def _refresh_queue_window(self):
         # Helper to ensure we always pass all 3 lists correctly
@@ -379,45 +404,11 @@ class MainWindow(QMainWindow):
         offset_ms = config.get('offset_ms', 0)
         active_ids = None
 
-        # 1. Output Resolution
-        # Defaults
-        default_res = (1920, 1080)
-        viewport_res = default_res
-
-        # Retrieve settings
-        use_video_dims = overrides.get('use_video_dims', False)
-        scale_to_hd = overrides.get('scale_to_hd', False)
-
+        # 1. Output Resolution (shared logic with the live preview / pop-out)
         # Get Video Dimensions from Job Config (detected in FilesPane)
         video_res = config.get('target_res')  # e.g. (3840, 1606)
-
-        if use_video_dims and video_res:
-            vw, vh = video_res
-
-            if scale_to_hd:
-                # SCALING LOGIC: Fit inside 1920x1080 maintaining AR
-                # Calculate scale factor
-                scale_x = 1920 / vw
-                scale_y = 1080 / vh
-                scale = min(scale_x, scale_y)
-
-                # Apply scale
-                new_w = int(round(vw * scale))
-                new_h = int(round(vh * scale))
-
-                # Ensure even dimensions (PGS requirement)
-                #if new_w % 2 != 0: new_w -= 1
-                #if new_h % 2 != 0: new_h -= 1
-
-                viewport_res = (new_w, new_h)
-                print(f"[RES] Scaling {vw}x{vh} -> {viewport_res} (Factor: {scale:.4f})")
-            else:
-                # USE RAW VIDEO DIMS
-                viewport_res = (vw, vh)
-                print(f"[RES] Using Source Video Dims: {viewport_res}")
-        else:
-            # DEFAULT 1080p
-            viewport_res = (1920, 1080)
+        viewport_res = self._calculate_viewport_res(overrides, video_res)
+        print(f"[RES] Viewport (output) resolution: {viewport_res}")
 
         # 2. Content Resolution: Determines where text sits (Layout)
         original_res = config.get('target_res', (1920, 1080))

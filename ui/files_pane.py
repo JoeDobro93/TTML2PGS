@@ -63,7 +63,8 @@ class ControlDelegate(QStyledItemDelegate):
 
 
 class FilesPane(QWidget):
-    project_loaded = pyqtSignal(object, tuple, bool, tuple)
+    # project, target_fps, is_hdr, target_res, video_path
+    project_loaded = pyqtSignal(object, tuple, bool, tuple, str)
     run_current = pyqtSignal(dict)
     run_batch = pyqtSignal(list)
 
@@ -343,7 +344,7 @@ class FilesPane(QWidget):
         if self.table.rowCount() == 1:
             rb.setChecked(True)
 
-            self.project_loaded.emit(project, row_data['target_fps'], row_data.get('is_hdr', False), row_data['target_res'])
+            self.project_loaded.emit(project, row_data['target_fps'], row_data.get('is_hdr', False), row_data['target_res'], row_data.get('video_path') or "")
 
     def _calc_output(self, sub_path, vid_path, project):
         # 1. Always use the subtitle file as the naming source
@@ -525,7 +526,7 @@ class FilesPane(QWidget):
                 rb = container.findChild(QRadioButton)
                 if rb and rb.isChecked():
                     # FIX 14: Emit is_hdr
-                    self.project_loaded.emit(data['project'], data['target_fps'], is_hdr, data['target_res'])
+                    self.project_loaded.emit(data['project'], data['target_fps'], is_hdr, data['target_res'], data.get('video_path') or "")
 
     def on_active_changed(self, btn, checked):
         if checked:
@@ -537,7 +538,7 @@ class FilesPane(QWidget):
                         data = self.get_row_data(row)
                         if data:
                             # FIX 15: Emit is_hdr
-                            self.project_loaded.emit(data['project'], data['target_fps'], data.get('is_hdr', False), data['target_res'])
+                            self.project_loaded.emit(data['project'], data['target_fps'], data.get('is_hdr', False), data['target_res'], data.get('video_path') or "")
                         break
 
     def emit_run_current(self):
