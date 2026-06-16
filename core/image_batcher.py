@@ -81,7 +81,8 @@ class ImageBatcher:
                             global_outline_width=3.0, global_outline_unit="px",
                             override_shadow=False, global_shadow_enabled=True, global_shadow_color="#000000",
                             global_shadow_offset_x=4.0, global_shadow_offset_y=4.0, global_shadow_blur=2.0,
-                            global_alpha=1.0):
+                            global_alpha=1.0,
+                            use_padding=False, padding_v=0.0, padding_h=0.0):
         """Stores style overrides to pass to the Renderer."""
         self.override_font_size = override_font_size
         self.global_font_size = global_font_size
@@ -105,6 +106,10 @@ class ImageBatcher:
         self.global_shadow_blur = global_shadow_blur
 
         self.global_alpha = global_alpha
+
+        self.use_padding = use_padding
+        self.padding_v = padding_v
+        self.padding_h = padding_h
 
     def set_target_framerate(self, num: int, den: int):
         """Sets the desired output framerate for the manifest."""
@@ -157,7 +162,8 @@ class ImageBatcher:
             global_shadow_color=self.global_shadow_color, global_shadow_alpha=self.global_shadow_alpha,
             global_shadow_offset_x=self.global_shadow_offset_x,
             global_shadow_offset_y=self.global_shadow_offset_y, global_shadow_blur=self.global_shadow_blur,
-            global_alpha=self.global_alpha
+            global_alpha=self.global_alpha,
+            use_padding=self.use_padding, padding_v=self.padding_v, padding_h=self.padding_h
         )
         log_step("Renderer Init", t_renderer_setup)
 

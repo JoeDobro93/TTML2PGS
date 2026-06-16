@@ -71,6 +71,12 @@ class PreviewPane(QWidget):
 
         # State
         self.bg_color = "#B0C4DE"
+
+        # Padding state (mirrors the Global Overrides settings)
+        self.pad_use = False
+        self.pad_v = 0.0
+        self.pad_h = 0.0
+
         self.update_background_layer()
 
         # --- FIX 1: Initialize overrides so it exists ---
@@ -106,6 +112,19 @@ class PreviewPane(QWidget):
             # Height is 100%, Width is auto
             fit_style = "height: 100%;"
 
+        # Build padding boundary guides (blue = vertical edges, red = horizontal edges).
+        # Each value is the total for its axis, split evenly between the two edges.
+        pad_lines = ""
+        if self.pad_use:
+            v_inset = self.pad_v / 2.0
+            h_inset = self.pad_h / 2.0
+            pad_lines = (
+                f'<div class="pad-line pad-v" style="top: {v_inset}%;"></div>'
+                f'<div class="pad-line pad-v" style="bottom: {v_inset}%;"></div>'
+                f'<div class="pad-line pad-h" style="left: {h_inset}%;"></div>'
+                f'<div class="pad-line pad-h" style="right: {h_inset}%;"></div>'
+            )
+
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -133,15 +152,20 @@ class PreviewPane(QWidget):
             }}
             /* The Active Video Content Area */
             .active-area {{
+                position: relative;
                 background-color: {self.bg_color};
                 aspect-ratio: {num} / {den};
                 {fit_style}
             }}
+            /* Padding boundary guides (overlaid on the active area) */
+            .pad-line {{ position: absolute; pointer-events: none; }}
+            .pad-v {{ left: 0; right: 0; border-top: 1px dashed #4aa3ff; }}   /* blue: vertical padding */
+            .pad-h {{ top: 0; bottom: 0; border-left: 1px dashed #ff4a4a; }}  /* red: horizontal padding */
         </style>
         </head>
         <body>
             <div class="frame-16-9">
-                <div class="active-area"></div>
+                <div class="active-area">{pad_lines}</div>
             </div>
         </body>
         </html>
@@ -160,6 +184,12 @@ class PreviewPane(QWidget):
 
         # --- FIX 2: Store overrides for later use in render_cue ---
         self.overrides = overrides or {}
+
+        # Sync padding state and refresh the boundary-line overlay
+        self.pad_use = self.overrides.get('use_padding', False)
+        self.pad_v = self.overrides.get('padding_v', 0.0)
+        self.pad_h = self.overrides.get('padding_h', 0.0)
+        self.update_background_layer()
 
         # Prepare arguments for the Renderer
         renderer_args = self.overrides.copy()

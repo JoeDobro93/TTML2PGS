@@ -385,18 +385,63 @@ class SettingsPane(QWidget):
         self.spin_ar_num.setRange(0.01, 100000.0)
         self.spin_ar_num.setDecimals(3)
         self.spin_ar_num.setValue(1920.0)
+        self.spin_ar_num.setFixedWidth(90)
 
         self.spin_ar_den = QDoubleSpinBox()
         self.spin_ar_den.setRange(0.01, 100000.0)
         self.spin_ar_den.setDecimals(3)
         self.spin_ar_den.setValue(800.0)
+        self.spin_ar_den.setFixedWidth(90)
 
         ar_layout = QHBoxLayout()
         ar_layout.addWidget(self.spin_ar_num)
         ar_layout.addWidget(QLabel(":"))
         ar_layout.addWidget(self.spin_ar_den)
+        ar_layout.addStretch()
 
         layout.addRow(self.chk_override_ar, ar_layout)
+
+        # --- Padding ---
+        # Moves the render reference borders inward (subtitles pushed into a smaller
+        # window) without scaling the text. Each percentage is the TOTAL on its axis,
+        # split evenly between the two opposing edges (e.g. 10% V -> 5% top + 5% bottom).
+        self.chk_use_padding = QCheckBox("Use Padding")
+        self.chk_use_padding.setToolTip(
+            "Insets the subtitle reference borders by a percentage of the frame,\n"
+            "pushing subtitles into a smaller window WITHOUT scaling the text.\n"
+            "Each value is the total for its axis, split evenly between both edges\n"
+            "(e.g. Vertical 10% = 5% top + 5% bottom).")
+        self.chk_use_padding.setChecked(False)  # Default OFF
+        apply_grey_style(self.chk_use_padding)
+        self.chk_use_padding.toggled.connect(self.update_override_visuals)
+        self.chk_use_padding.toggled.connect(self.emit_change)
+
+        self.spin_pad_v = QDoubleSpinBox()
+        self.spin_pad_v.setRange(0.0, 100.0)
+        self.spin_pad_v.setDecimals(1)
+        self.spin_pad_v.setSingleStep(0.5)
+        self.spin_pad_v.setSuffix(" %")
+        self.spin_pad_v.setValue(0.0)
+        self.spin_pad_v.setFixedWidth(90)
+        self.spin_pad_v.setToolTip("Vertical padding (total, split between top and bottom).")
+
+        self.spin_pad_h = QDoubleSpinBox()
+        self.spin_pad_h.setRange(0.0, 100.0)
+        self.spin_pad_h.setDecimals(1)
+        self.spin_pad_h.setSingleStep(0.5)
+        self.spin_pad_h.setSuffix(" %")
+        self.spin_pad_h.setValue(0.0)
+        self.spin_pad_h.setFixedWidth(90)
+        self.spin_pad_h.setToolTip("Horizontal padding (total, split between left and right).")
+
+        pad_layout = QHBoxLayout()
+        pad_layout.addWidget(QLabel("V:"))
+        pad_layout.addWidget(self.spin_pad_v)
+        pad_layout.addWidget(QLabel("H:"))
+        pad_layout.addWidget(self.spin_pad_h)
+        pad_layout.addStretch()
+
+        layout.addRow(self.chk_use_padding, pad_layout)
 
         self.gb_post = QGroupBox("Post-Processing")
         # We use a simple vertical layout inside the group box
@@ -448,7 +493,8 @@ class SettingsPane(QWidget):
                   self.spin_font_size, self.cmb_font_unit, self.chk_outline_enable,
                   self.spin_outline_width, self.cmb_outline_unit, self.chk_shadow_enable, self.spin_shadow_x,
                   self.spin_shadow_y, self.spin_shadow_blur, self.spin_alpha,
-                  self.spin_ar_num, self.spin_ar_den, self.chk_override_ar]:
+                  self.spin_ar_num, self.spin_ar_den, self.chk_override_ar,
+                  self.spin_pad_v, self.spin_pad_h]:
             try:
                 w.valueChanged.connect(self.emit_change)
             except:
@@ -723,6 +769,8 @@ class SettingsPane(QWidget):
 
         set_visual_state(self.chk_override_ar.isChecked(), [self.spin_ar_num, self.spin_ar_den])
 
+        set_visual_state(self.chk_use_padding.isChecked(), [self.spin_pad_v, self.spin_pad_h])
+
     def toggle_auto_color_state(self, checked):
         # When Auto-Color is ON, disable manual Color/Alpha controls
         enabled = not checked
@@ -817,6 +865,10 @@ class SettingsPane(QWidget):
             "override_ar_enabled": self.chk_override_ar.isChecked(),
             "ar_num": self.spin_ar_num.value(),
             "ar_den": self.spin_ar_den.value(),
+
+            "use_padding": self.chk_use_padding.isChecked(),
+            "padding_v": self.spin_pad_v.value(),
+            "padding_h": self.spin_pad_h.value(),
 
             "remux_enabled": self.chk_remux.isChecked(),
 

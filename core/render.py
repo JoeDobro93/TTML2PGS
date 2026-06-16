@@ -34,11 +34,18 @@ class HtmlRenderer:
                  global_shadow_color: str = "#000000", global_shadow_alpha: float = 1.0,
                  global_shadow_offset_x: float = 4.0, global_shadow_offset_y: float = 4.0,
                  global_shadow_blur: float = 2.0,
-                 global_alpha: float = 1.0):
+                 global_alpha: float = 1.0,
+                 use_padding: bool = False, padding_v: float = 0.0, padding_h: float = 0.0):
 
         self.project = project
         self.content_resolution = content_resolution
         self.debug_mode = debug_mode
+
+        # Padding (moves the positioning reference borders inward without scaling text).
+        # Each value is the TOTAL percentage on its axis, split evenly between the two edges.
+        self.use_padding = use_padding
+        self.padding_v = padding_v
+        self.padding_h = padding_h
 
         # Store Overrides
         self.override_font_size = override_font_size
@@ -95,6 +102,16 @@ class HtmlRenderer:
         fps = f"{self.project.fps_num}/{self.project.fps_den}"
         lang = self.project.language or "ja"
 
+        # --- PADDING ---
+        # Inset the positioning reference (#pad-box) by half the padding on each edge.
+        # --pvh/--pvw stay tied to the full #player-box, so font sizes are NOT scaled;
+        # only %-based region positions/sizes resolve against the smaller padded box.
+        if self.use_padding:
+            pad_top = pad_bottom = self.padding_v / 2.0
+            pad_left = pad_right = self.padding_h / 2.0
+        else:
+            pad_top = pad_bottom = pad_left = pad_right = 0.0
+
         # If preview_bg is passed, use it. Else fall back to debug/transparent.
         if preview_bg:
             print("setting preview color")
@@ -128,10 +145,20 @@ class HtmlRenderer:
 
   .frame {{ position: relative; width: 100%; height: 100%; }}
 
-  #player-box {{ 
-    position: absolute; 
-    background: {player_bg}; 
-    pointer-events: none; 
+  #player-box {{
+    position: absolute;
+    background: {player_bg};
+    pointer-events: none;
+  }}
+
+  /* Padded positioning reference. Insets the region borders without
+     touching --pvh/--pvw, so text size is preserved. */
+  #pad-box {{
+    position: absolute;
+    top: {pad_top}%;
+    bottom: {pad_bottom}%;
+    left: {pad_left}%;
+    right: {pad_right}%;
   }}
 
   .region {{
@@ -213,8 +240,10 @@ class HtmlRenderer:
 <body>
 <div class="frame">
   <div id="player-box">
-    <div class="region" style="{region_style}">
-      <p style="{p_style}">{content_html}</p>
+    <div id="pad-box">
+      <div class="region" style="{region_style}">
+        <p style="{p_style}">{content_html}</p>
+      </div>
     </div>
   </div>
 </div>
