@@ -234,6 +234,7 @@ class PreviewPane(QWidget):
         # and so we can skip redundant web-view reloads (which flicker).
         self._last_fg_html = ""
         self._last_bg_html = None
+        self._last_popout_bg_html = None
 
         self.overrides = {}
         self.renderer = None
@@ -254,8 +255,11 @@ class PreviewPane(QWidget):
             self.popout_window.destroyed.connect(self._on_popout_destroyed)
             self.popout_window.set_output_dimensions(*self.viewport_res)
             self.popout_window.show()
-            # Seed it with the current frame content.
-            self.popout_window.update_bg_html(self._build_background_html())
+            # Seed it with the current content, using the true output aspect ratio.
+            vw, vh = self.viewport_res
+            popout_html = self._build_background_html(vw, vh)
+            self._last_popout_bg_html = popout_html
+            self.popout_window.update_bg_html(popout_html)
             if self._last_fg_html:
                 self.popout_window.update_fg_html(self._last_fg_html)
             self.btn_popout.setText("Close Pop Out")
@@ -278,24 +282,30 @@ class PreviewPane(QWidget):
     # =========================================================================
     # BACKGROUND LAYER
     # =========================================================================
-    def _build_background_html(self):
+    def _build_background_html(self, frame_num=16, frame_den=9):
         """
-        Build the Background Layer HTML: a 16:9 black frame containing the
-        'active area' (coloured matte sized by the AR controls). When video
-        frames are enabled, the extracted frame is drawn inside the active
-        area, behind the padding guides. Subtitles sit on the foreground
-        layer above everything.
+        Build the Background Layer HTML: a black OUTPUT frame (aspect
+        frame_num:frame_den) containing the 'active area' (coloured matte sized
+        by the AR controls). When video frames are enabled, the extracted frame
+        is drawn inside the active area, behind the padding guides. Subtitles
+        sit on the foreground layer above everything.
+
+        The outer frame represents the true output canvas. The main preview pane
+        uses 16:9 (the default); the pop-out passes its real viewport_res so it
+        shows the exact output shape with no spurious letter/pillarboxing.
         """
         num = self.spin_ar_num.value()
         den = self.spin_ar_den.value()
         if den == 0:
             den = 1
+        if frame_den == 0:
+            frame_den = 1
 
         target_ratio = num / den
-        base_ratio = 16 / 9
+        frame_ratio = frame_num / frame_den
 
-        if target_ratio > base_ratio:
-            # Wider than 16:9 -> letterbox (bars top/bottom)
+        if target_ratio > frame_ratio:
+            # Active area wider than the output canvas -> letterbox (bars top/bottom)
             fit_style = "width: 100%;"
         else:
             # Taller/equal -> pillarbox (bars left/right)
@@ -332,9 +342,11 @@ class PreviewPane(QWidget):
                 align-items: center;
                 overflow: hidden;
             }}
-            /* The 16:9 HD Frame (The "Black Bars" Generator) */
-            .frame-16-9 {{
-                aspect-ratio: 16/9;
+            /* The Output Canvas Frame (the "Black Bars" generator).
+               Its aspect ratio is the true output shape: 16:9 for the main
+               preview pane, or the actual viewport_res for the pop-out. */
+            .output-frame {{
+                aspect-ratio: {frame_num} / {frame_den};
                 width: 100%;
                 max-width: 100vw;
                 max-height: 100vh;
@@ -369,7 +381,7 @@ class PreviewPane(QWidget):
         </style>
         </head>
         <body>
-            <div class="frame-16-9">
+            <div class="output-frame">
                 <div class="active-area">{frame_html}{pad_lines}</div>
             </div>
         </body>
@@ -377,15 +389,22 @@ class PreviewPane(QWidget):
         """
 
     def update_background_layer(self):
+        # Main pane: always the 16:9 reference frame.
         html = self._build_background_html()
         # Skip redundant reloads (avoids a flicker on every cue change when the
         # background hasn't actually changed, e.g. video frames disabled).
-        if html == self._last_bg_html:
-            return
-        self._last_bg_html = html
-        self.view_bg.setHtml(html)
+        if html != self._last_bg_html:
+            self._last_bg_html = html
+            self.view_bg.setHtml(html)
+
+        # Pop-out: use the true output aspect ratio so it matches the render
+        # exactly (no spurious letter/pillarboxing for non-16:9 output).
         if self.popout_window is not None:
-            self.popout_window.update_bg_html(html)
+            vw, vh = self.viewport_res
+            popout_html = self._build_background_html(vw, vh)
+            if popout_html != self._last_popout_bg_html:
+                self._last_popout_bg_html = popout_html
+                self.popout_window.update_bg_html(popout_html)
 
     def pick_color(self):
         c = QColorDialog.getColor(QColor(self.bg_color))
