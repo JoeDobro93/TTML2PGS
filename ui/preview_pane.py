@@ -351,12 +351,15 @@ class PreviewPane(QWidget):
                 {fit_style}
                 overflow: hidden;
             }}
-            /* Video frame fills the active area, above the matte colour. */
+            /* Video frame sits inside the active area, above the matte colour.
+               object-fit: contain preserves the video's native aspect ratio,
+               letter/pillarboxing against the black active area when the video
+               is not the same shape as the active area (no stretching). */
             .video-frame {{
                 position: absolute;
                 top: 0; left: 0;
                 width: 100%; height: 100%;
-                object-fit: fill;
+                object-fit: contain;
                 z-index: 1;
             }}
             /* Padding boundary guides (overlaid above the frame) */
