@@ -204,14 +204,14 @@ class PreviewPane(QWidget):
         self.spin_ar_num.setDecimals(3)
         self.spin_ar_num.setSingleStep(0.01)
         self.spin_ar_num.setValue(16.0)
-        self.spin_ar_num.valueChanged.connect(self.update_background_layer)
+        self.spin_ar_num.valueChanged.connect(self._on_ar_changed)
 
         self.spin_ar_den = QDoubleSpinBox()
         self.spin_ar_den.setRange(0.01, 10000.0)
         self.spin_ar_den.setDecimals(3)
         self.spin_ar_den.setSingleStep(0.01)
         self.spin_ar_den.setValue(9.0)
-        self.spin_ar_den.valueChanged.connect(self.update_background_layer)
+        self.spin_ar_den.valueChanged.connect(self._on_ar_changed)
 
         ar_layout.addWidget(self.spin_ar_num)
         ar_layout.addWidget(QLabel(":"))
@@ -230,6 +230,13 @@ class PreviewPane(QWidget):
 
         # Output resolution (the size fed to the Chrome windows / popout).
         self.viewport_res = (1920, 1080)
+
+        # Per-file preview AR memory. The AR controls only draw black-bar guides
+        # in the preview; they do not affect the rendered output. Each loaded
+        # file defaults to its own video aspect ratio and remembers manual edits.
+        self._ar_by_key = {}            # file key -> (num, den)
+        self._current_ar_key = None     # key of the file currently loaded
+        self._suppress_ar_save = False  # True while setting spinboxes programmatically
 
         # Video frame state
         self.show_frames = False
@@ -297,15 +304,19 @@ class PreviewPane(QWidget):
     # =========================================================================
     def _build_background_html(self, frame_num=16, frame_den=9):
         """
-        Build the Background Layer HTML: a black OUTPUT frame (aspect
-        frame_num:frame_den) containing the 'active area' (coloured matte sized
-        by the AR controls). When video frames are enabled, the extracted frame
-        is drawn inside the active area, behind the padding guides. Subtitles
-        sit on the foreground layer above everything.
+        Build the Background Layer HTML for an OUTPUT canvas of aspect
+        frame_num:frame_den (16:9 for the main pane, the real viewport_res for
+        the pop-out).
 
-        The outer frame represents the true output canvas. The main preview pane
-        uses 16:9 (the default); the pop-out passes its real viewport_res so it
-        shows the exact output shape with no spurious letter/pillarboxing.
+        Layering, from back to front:
+          1. The output canvas itself is black (these are the "black bars").
+          2. A coloured matte sized by the AR controls — purely a visual guide
+             showing where the active content area sits. Mostly useful when no
+             video frame is shown.
+          3. The extracted video frame (when enabled) fills the WHOLE canvas
+             1:1, so the AR controls never crop or reposition it.
+          4. Padding boundary guides, aligned to the active area, on top.
+        Subtitles sit on the separate foreground layer above all of this.
         """
         num = self.spin_ar_num.value()
         den = self.spin_ar_den.value()
@@ -314,36 +325,49 @@ class PreviewPane(QWidget):
         if frame_den == 0:
             frame_den = 1
 
-        target_ratio = num / den
+        content_ratio = num / den
         frame_ratio = frame_num / frame_den
-        # Debug: log which aspect ratio is being used
-        is_popout = (frame_num != 16 or frame_den != 9)
-        print(f"[BG] Building {'pop-out' if is_popout else 'main'} HTML: "
-              f"frame={frame_num}/{frame_den}={frame_ratio:.3f}, "
-              f"content={num}/{den}={target_ratio:.3f}")
 
-        if target_ratio > frame_ratio:
-            # Active area wider than the output canvas -> letterbox (bars top/bottom)
-            fit_style = "width: 100%;"
+        # Active-area (matte) box as a percentage of the output canvas. It is
+        # centred and letter/pillarboxed to fit content_ratio inside the canvas.
+        if content_ratio > frame_ratio:
+            aa_w = 100.0
+            aa_h = (frame_ratio / content_ratio) * 100.0
         else:
-            # Taller/equal -> pillarbox (bars left/right)
-            fit_style = "height: 100%;"
+            aa_h = 100.0
+            aa_w = (content_ratio / frame_ratio) * 100.0
+        aa_left = (100.0 - aa_w) / 2.0
+        aa_top = (100.0 - aa_h) / 2.0
 
-        # Optional video frame layer (sits behind the padding guides).
+        matte_html = (
+            f'<div class="matte" style="left:{aa_left:.4f}%;top:{aa_top:.4f}%;'
+            f'width:{aa_w:.4f}%;height:{aa_h:.4f}%;"></div>'
+        )
+
+        # Video frame fills the entire canvas 1:1 (object-fit: contain keeps its
+        # aspect; with Use Video Dimensions the canvas already matches it).
         frame_html = ""
         if self.show_frames and self._frame_uri:
             frame_html = f'<img class="video-frame" src="{self._frame_uri}" />'
 
-        # Padding boundary guides (blue = vertical edges, red = horizontal).
+        # Padding boundary guides, positioned relative to the active area.
         pad_lines = ""
         if self.pad_use:
-            v_inset = self.pad_v / 2.0
-            h_inset = self.pad_h / 2.0
+            v_inset = self.pad_v / 2.0   # % of active-area height
+            h_inset = self.pad_h / 2.0   # % of active-area width
+            top1 = aa_top + (v_inset / 100.0) * aa_h
+            bot1 = aa_top + aa_h - (v_inset / 100.0) * aa_h
+            left1 = aa_left + (h_inset / 100.0) * aa_w
+            right1 = aa_left + aa_w - (h_inset / 100.0) * aa_w
             pad_lines = (
-                f'<div class="pad-line pad-v" style="top: {v_inset}%;"></div>'
-                f'<div class="pad-line pad-v" style="bottom: {v_inset}%;"></div>'
-                f'<div class="pad-line pad-h" style="left: {h_inset}%;"></div>'
-                f'<div class="pad-line pad-h" style="right: {h_inset}%;"></div>'
+                f'<div class="pad-line" style="left:{aa_left:.4f}%;width:{aa_w:.4f}%;'
+                f'top:{top1:.4f}%;border-top:1px dashed #4aa3ff;"></div>'
+                f'<div class="pad-line" style="left:{aa_left:.4f}%;width:{aa_w:.4f}%;'
+                f'top:{bot1:.4f}%;border-top:1px dashed #4aa3ff;"></div>'
+                f'<div class="pad-line" style="top:{aa_top:.4f}%;height:{aa_h:.4f}%;'
+                f'left:{left1:.4f}%;border-left:1px dashed #ff4a4a;"></div>'
+                f'<div class="pad-line" style="top:{aa_top:.4f}%;height:{aa_h:.4f}%;'
+                f'left:{right1:.4f}%;border-left:1px dashed #ff4a4a;"></div>'
             )
 
         return f"""
@@ -360,48 +384,38 @@ class PreviewPane(QWidget):
                 align-items: center;
                 overflow: hidden;
             }}
-            /* The Output Canvas Frame (the "Black Bars" generator).
-               Its aspect ratio is the true output shape: 16:9 for the main
-               preview pane, or the actual viewport_res for the pop-out. */
+            /* The Output Canvas. Its black background IS the "black bars".
+               Aspect = 16:9 (main pane) or the real viewport_res (pop-out). */
             .output-frame {{
+                position: relative;
                 aspect-ratio: {frame_num} / {frame_den};
                 width: 100%;
                 max-width: 100vw;
                 max-height: 100vh;
                 background-color: black;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }}
-            /* The Active Video Content Area */
-            .active-area {{
-                position: relative;
-                background-color: {self.bg_color};
-                aspect-ratio: {num} / {den};
-                {fit_style}
                 overflow: hidden;
             }}
-            /* Video frame sits inside the active area, above the matte colour.
-               object-fit: contain preserves the video's native aspect ratio,
-               letter/pillarboxing against the black active area when the video
-               is not the same shape as the active area (no stretching). */
+            /* Coloured matte guide (the active content area). Behind the frame. */
+            .matte {{
+                position: absolute;
+                background-color: {self.bg_color};
+                z-index: 1;
+            }}
+            /* Video frame: fills the whole canvas 1:1, on top of the matte so
+               the AR guide never crops or repositions it. */
             .video-frame {{
                 position: absolute;
                 top: 0; left: 0;
                 width: 100%; height: 100%;
                 object-fit: contain;
-                z-index: 1;
+                z-index: 2;
             }}
-            /* Padding boundary guides (overlaid above the frame) */
-            .pad-line {{ position: absolute; pointer-events: none; z-index: 2; }}
-            .pad-v {{ left: 0; right: 0; border-top: 1px dashed #4aa3ff; }}   /* blue: vertical padding */
-            .pad-h {{ top: 0; bottom: 0; border-left: 1px dashed #ff4a4a; }}  /* red: horizontal padding */
+            /* Padding boundary guides, above the frame. */
+            .pad-line {{ position: absolute; pointer-events: none; z-index: 3; }}
         </style>
         </head>
         <body>
-            <div class="output-frame">
-                <div class="active-area">{frame_html}{pad_lines}</div>
-            </div>
+            <div class="output-frame">{matte_html}{frame_html}{pad_lines}</div>
         </body>
         </html>
         """
@@ -423,6 +437,24 @@ class PreviewPane(QWidget):
             if popout_html != self._last_popout_bg_html:
                 self._last_popout_bg_html = popout_html
                 self.popout_window.update_bg_html(popout_html)
+
+    def _on_ar_changed(self):
+        # While setting the spinboxes programmatically, do nothing here; the
+        # caller (set_project) refreshes the background once both are set.
+        if self._suppress_ar_save:
+            return
+        # Remember the AR the user picked for the currently loaded file.
+        if self._current_ar_key is not None:
+            self._ar_by_key[self._current_ar_key] = (
+                self.spin_ar_num.value(), self.spin_ar_den.value())
+        self.update_background_layer()
+
+    def _set_ar_spinboxes(self, num, den):
+        """Set the AR controls without recording it as a manual user edit."""
+        self._suppress_ar_save = True
+        self.spin_ar_num.setValue(float(num))
+        self.spin_ar_den.setValue(float(den))
+        self._suppress_ar_save = False
 
     def pick_color(self):
         c = QColorDialog.getColor(QColor(self.bg_color))
@@ -513,11 +545,18 @@ class PreviewPane(QWidget):
 
         candidates = []
         if " libplacebo " in available:
-            # libplacebo auto-detects HDR metadata (including DV RPU) and tone maps
-            # accordingly. Just ensure output is SDR (bt709/yuv420p).
+            # libplacebo is the only chain that applies the Dolby Vision RPU,
+            # which is what fixes the DV Profile 5 purple/green cast. Try the
+            # DV-aware form first; fall back to plain HDR tone mapping for builds
+            # whose libplacebo lacks the apply_dolbyvision option.
+            candidates.append(
+                "libplacebo=apply_dolbyvision=true:tonemapping=bt.2390:"
+                "colorspace=bt709:color_primaries=bt709:color_trc=bt709,"
+                "format=yuv420p")
             candidates.append("libplacebo=format=yuv420p")
         if " zscale " in available and " tonemap " in available:
-            # Fallback for older ffmpeg without libplacebo.
+            # Fallback for HDR10/HLG when libplacebo is unavailable or fails.
+            # (This cannot fix DV Profile 5, which needs the RPU.)
             candidates.append(
                 "zscale=t=linear:npl=100,format=gbrpf32le,"
                 "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
@@ -563,12 +602,14 @@ class PreviewPane(QWidget):
                 cmd += ["-vf", vf]
             cmd += ["-q:v", "2", tmp_path]
 
+            # Capture stderr (as bytes) so a failing tone-map attempt can report
+            # *why* it failed (e.g. Vulkan/libplacebo errors) for diagnosis.
             try:
                 result = subprocess.run(
                     cmd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     timeout=30,
                     creationflags=_NO_WINDOW,
                 )
@@ -587,6 +628,8 @@ class PreviewPane(QWidget):
                 # Remember the chain that worked so later frames skip the duds.
                 if self.tone_map_hdr:
                     self._tonemap_vf = vf
+                    if vf:
+                        print(f"[FRAME] tone-map OK via: {vf.split(',')[0]}")
                 try:
                     with open(tmp_path, "rb") as fh:
                         encoded = base64.b64encode(fh.read()).decode("ascii")
@@ -600,9 +643,16 @@ class PreviewPane(QWidget):
                     except OSError:
                         pass
 
-            # This chain failed; clean up any partial file and try the next one.
+            # This chain failed; surface the ffmpeg error and try the next one.
             if vf:
-                print(f"[FRAME] tone-map chain failed (rc={result.returncode}), trying fallback.")
+                err = (result.stderr or b"").decode("utf-8", errors="ignore")
+                tail = " | ".join(
+                    ln.strip() for ln in err.strip().splitlines()[-4:] if ln.strip())
+                print(f"[FRAME] tone-map chain failed (rc={result.returncode}): "
+                      f"{vf.split(',')[0]}")
+                if tail:
+                    print(f"[FRAME]   ffmpeg: {tail}")
+                print("[FRAME]   trying fallback.")
             try:
                 os.remove(tmp_path)
             except OSError:
@@ -614,7 +664,8 @@ class PreviewPane(QWidget):
     # =========================================================================
     # PROJECT / RENDER
     # =========================================================================
-    def set_project(self, project, overrides, content_res=None, viewport_res=None, video_path=None):
+    def set_project(self, project, overrides, content_res=None, viewport_res=None,
+                    video_res=None, video_path=None):
         print(f"[DEBUG] set_project called with overrides: {overrides.keys() if overrides else 'None'}")
 
         self.overrides = overrides or {}
@@ -626,6 +677,22 @@ class PreviewPane(QWidget):
             self.viewport_res = viewport_res
             if self.popout_window is not None:
                 self.popout_window.set_output_dimensions(*viewport_res)
+
+        # Default the preview AR guide to this file's video aspect ratio, with
+        # per-file memory of any manual edits. Only (re)apply when the loaded
+        # file actually changes, so settings refreshes never clobber the user's
+        # choice. Key by video path, falling back to project identity.
+        ar_key = video_path or (id(project) if project is not None else None)
+        if ar_key is not None and ar_key != self._current_ar_key:
+            self._current_ar_key = ar_key
+            if ar_key in self._ar_by_key:
+                num, den = self._ar_by_key[ar_key]
+            elif video_res and video_res[0] and video_res[1]:
+                num, den = video_res
+                self._ar_by_key[ar_key] = (num, den)
+            else:
+                num, den = 16.0, 9.0
+            self._set_ar_spinboxes(num, den)
 
         # Sync padding state and refresh the boundary-line overlay
         self.pad_use = self.overrides.get('use_padding', False)

@@ -271,6 +271,7 @@ class MainWindow(QMainWindow):
 
             self.preview_pane.set_project(project, overrides, final_res,
                                           viewport_res=viewport_res,
+                                          video_res=content_res,
                                           video_path=self.current_video_path)
             self.cues_pane.load_project(project)
 
@@ -290,6 +291,7 @@ class MainWindow(QMainWindow):
 
             self.preview_pane.set_project(self.current_project, overrides, final_res,
                                           viewport_res=viewport_res,
+                                          video_res=base_res,
                                           video_path=getattr(self, 'current_video_path', ""))
 
     def _refresh_queue_window(self):
