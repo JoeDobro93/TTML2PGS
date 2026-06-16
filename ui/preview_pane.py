@@ -316,6 +316,11 @@ class PreviewPane(QWidget):
 
         target_ratio = num / den
         frame_ratio = frame_num / frame_den
+        # Debug: log which aspect ratio is being used
+        is_popout = (frame_num != 16 or frame_den != 9)
+        print(f"[BG] Building {'pop-out' if is_popout else 'main'} HTML: "
+              f"frame={frame_num}/{frame_den}={frame_ratio:.3f}, "
+              f"content={num}/{den}={target_ratio:.3f}")
 
         if target_ratio > frame_ratio:
             # Active area wider than the output canvas -> letterbox (bars top/bottom)
@@ -479,14 +484,14 @@ class PreviewPane(QWidget):
         Ordered list of ffmpeg -vf tone-mapping chains to try, best first.
 
         Probed against the installed ffmpeg once and cached. libplacebo is
-        preferred: it applies the Dolby Vision RPU (fixing the purple/green cast
-        on DV Profile 5, which the zscale/tonemap chain cannot do) and handles
-        HDR10/HLG. The zscale chain is the fallback for HDR10/HLG. Both are
+        preferred when available (it handles Dolby Vision metadata), with a
+        zscale+tonemap fallback for HDR10/HLG on older builds. Both are
         transfer-aware, so SDR input passes through essentially unchanged.
 
         A chain can be *listed* by ffmpeg yet fail at runtime (e.g. libplacebo
-        with no Vulkan device), so the extractor tries them in order and an
-        empty chain (untone-mapped) is always the last resort.
+        with unusual Dolby Vision streams or missing Vulkan), so the extractor
+        tries them in order and an empty chain (untone-mapped) is always the
+        last resort to ensure a frame is always extracted.
         """
         if self._tonemap_candidates_cache is not None:
             return self._tonemap_candidates_cache
@@ -508,10 +513,11 @@ class PreviewPane(QWidget):
 
         candidates = []
         if " libplacebo " in available:
-            candidates.append(
-                "libplacebo=tonemapping=bt.2390:colorspace=bt709:"
-                "color_primaries=bt709:color_trc=bt709,format=yuv420p")
+            # libplacebo auto-detects HDR metadata (including DV RPU) and tone maps
+            # accordingly. Just ensure output is SDR (bt709/yuv420p).
+            candidates.append("libplacebo=format=yuv420p")
         if " zscale " in available and " tonemap " in available:
+            # Fallback for older ffmpeg without libplacebo.
             candidates.append(
                 "zscale=t=linear:npl=100,format=gbrpf32le,"
                 "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
