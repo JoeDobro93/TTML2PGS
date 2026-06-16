@@ -246,6 +246,7 @@ class PreviewPane(QWidget):
         self._frame_cache_key = None    # (video_path, rounded_ms, tone_map) of cached frame
         self._tonemap_candidates_cache = None  # probed ffmpeg tonemap chains (ordered)
         self._tonemap_vf = None         # the chain that last worked (tried first next time)
+        self._vulkan_warned = False     # one-time libplacebo/Vulkan failure hint
 
         # Pop-out window (created on demand)
         self.popout_window = None
@@ -556,11 +557,13 @@ class PreviewPane(QWidget):
             candidates.append("libplacebo=format=yuv420p")
         if " zscale " in available and " tonemap " in available:
             # Fallback for HDR10/HLG when libplacebo is unavailable or fails.
-            # (This cannot fix DV Profile 5, which needs the RPU.)
+            # (This cannot fix DV Profile 5, which needs the RPU.) Input transfer
+            # /matrix/primaries are forced (tin/min/pin) so streams with
+            # unspecified colour metadata don't error out with -22.
             candidates.append(
-                "zscale=t=linear:npl=100,format=gbrpf32le,"
-                "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
-                "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+                "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,"
+                "format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+                "zscale=t=bt709:m=bt709:p=bt709:r=tv,format=yuv420p")
         # Last resort: no filter (frame shown untone-mapped) so the user still
         # gets a positioning reference even if no tone-mapper works.
         candidates.append("")
@@ -590,10 +593,17 @@ class PreviewPane(QWidget):
             vf_attempts = [None]
 
         for vf in vf_attempts:
+            # libplacebo needs a Vulkan device; create one explicitly (global
+            # option, before -i) as it is more reliable than ffmpeg's auto-init.
+            pre_args = []
+            if vf and "libplacebo" in vf:
+                pre_args = ["-init_hw_device", "vulkan", "-filter_hw_device", "vulkan"]
+
             # Input seeking (-ss before -i) is fast even on large/network files.
             # -nostdin + -y prevent the interactive overwrite prompt from hanging.
             cmd = [
                 "ffmpeg", "-nostdin", "-y",
+                *pre_args,
                 "-ss", f"{timestamp_seconds:.3f}",
                 "-i", video_path,
                 "-frames:v", "1",
@@ -652,6 +662,18 @@ class PreviewPane(QWidget):
                       f"{vf.split(',')[0]}")
                 if tail:
                     print(f"[FRAME]   ffmpeg: {tail}")
+                # libplacebo is the only chain that corrects Dolby Vision P5;
+                # if its Vulkan device can't be created, flag it once with a hint.
+                if ("libplacebo" in vf and "Vulkan" in err
+                        and not self._vulkan_warned):
+                    self._vulkan_warned = True
+                    print("[FRAME]   NOTE: libplacebo could not create a Vulkan "
+                          "device. Dolby Vision Profile 5 colour correction "
+                          "requires a Vulkan-capable GPU/driver and an ffmpeg "
+                          "built with libplacebo. Update your GPU drivers / "
+                          "install the Vulkan runtime, or use an ffmpeg build "
+                          "with working Vulkan support. The non-libplacebo "
+                          "fallbacks cannot fix the DV P5 colour cast.")
                 print("[FRAME]   trying fallback.")
             try:
                 os.remove(tmp_path)
