@@ -935,7 +935,7 @@ class WebVTTIngester:
         return r
 
     def _parse_vtt_time(self, t):
-        parts = t.replace('.', ':').split(':')
+        parts = t.replace(',', ':').replace('.', ':').split(':')
         if len(parts) == 4: return int(
             (int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])) * 1000 + int(parts[3]))
         if len(parts) == 3: return int((int(parts[0]) * 60 + int(parts[1])) * 1000 + int(parts[2]))
