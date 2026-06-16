@@ -1,10 +1,23 @@
+import os
 import traceback
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QColorDialog, QPushButton, QHBoxLayout, QStackedLayout,
-                             QSpinBox, QDoubleSpinBox)
+                             QSpinBox, QDoubleSpinBox, QCheckBox)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QUrl, pyqtSignal
 
 from core.render import HtmlRenderer
+from core.video_frame import VideoFrameExtractor
+
+
+# Layer draw order (bottom -> top). Later layers render on top.
+LAYERS = ("bg", "video", "fg", "overlay")
+
+
+def _transparent_view():
+    v = QWebEngineView()
+    v.page().setBackgroundColor(QColor("transparent"))
+    return v
 
 
 class PreviewPane(QWidget):
@@ -16,33 +29,49 @@ class PreviewPane(QWidget):
         # Top Bar
         top_bar = QHBoxLayout()
         self.lbl_title = QLabel("Preview")
+        self.chk_show_frames = QCheckBox("Show video frames")
+        self.chk_show_frames.setToolTip(
+            "Render a still from the matched video (at the midpoint of the selected\n"
+            "subtitle) behind the subtitles and padding lines. Requires ffmpeg and a\n"
+            "matched video file.")
+        self.chk_show_frames.setChecked(False)  # Default OFF
+        self.chk_show_frames.toggled.connect(self.update_video_layer)
+        self.btn_popout = QPushButton("Pop Out Preview")
+        self.btn_popout.setToolTip(
+            "Open a window sized to the exact output resolution that mirrors this\n"
+            "preview. Useful for verifying pixel-accurate placement.")
+        self.btn_popout.clicked.connect(self.open_popout)
         self.btn_bg_color = QPushButton("Set BG Color")
         top_bar.addWidget(self.lbl_title)
         top_bar.addStretch()
+        top_bar.addWidget(self.chk_show_frames)
+        top_bar.addWidget(self.btn_popout)
         top_bar.addWidget(self.btn_bg_color)
         self.layout.addLayout(top_bar)
 
         # --- PREVIEW STACK (Layered HTML) ---
-        # Container to hold the stack (This will be forced to 16:9)
         self.stack_container = QWidget()
         self.stack_layout = QStackedLayout(self.stack_container)
         self.stack_layout.setStackingMode(QStackedLayout.StackingMode.StackAll)
 
         # WRAPPER: Lock the container to 16:9
-        # The stack_container becomes a child of this wrapper.
         self.ar_wrapper = AspectRatioWidget(self.stack_container)
-
-        # Add the wrapper to the layout instead of the raw container
         self.layout.addWidget(self.ar_wrapper)
 
-        # Layer 1: Background (Color + Aspect Ratio Matte)
-        self.view_bg = QWebEngineView()
-        self.stack_layout.addWidget(self.view_bg)
+        # Layers (added bottom -> top)
+        self.view_bg = QWebEngineView()           # Background: bg color + AR matte (opaque)
+        self.view_video = _transparent_view()     # Video frame (optional)
+        self.view_fg = _transparent_view()         # Subtitles (transparent)
+        self.view_overlay = _transparent_view()    # Padding boundary lines (transparent)
 
-        # Layer 2: Foreground (Subtitles - Transparent)
-        self.view_fg = QWebEngineView()
-        self.view_fg.page().setBackgroundColor(QColor("transparent"))
-        self.stack_layout.addWidget(self.view_fg)
+        self._views = {
+            "bg": self.view_bg,
+            "video": self.view_video,
+            "fg": self.view_fg,
+            "overlay": self.view_overlay,
+        }
+        for name in LAYERS:
+            self.stack_layout.addWidget(self._views[name])
 
         # --- ASPECT RATIO CONTROLS ---
         ar_layout = QHBoxLayout()
@@ -53,14 +82,14 @@ class PreviewPane(QWidget):
         self.spin_ar_num.setDecimals(3)
         self.spin_ar_num.setSingleStep(0.01)
         self.spin_ar_num.setValue(16.0)
-        self.spin_ar_num.valueChanged.connect(self.update_background_layer)
+        self.spin_ar_num.valueChanged.connect(self.refresh_layout_layers)
 
         self.spin_ar_den = QDoubleSpinBox()
         self.spin_ar_den.setRange(0.01, 10000.0)
         self.spin_ar_den.setDecimals(3)
         self.spin_ar_den.setSingleStep(0.01)
         self.spin_ar_den.setValue(9.0)
-        self.spin_ar_den.valueChanged.connect(self.update_background_layer)
+        self.spin_ar_den.valueChanged.connect(self.refresh_layout_layers)
 
         ar_layout.addWidget(self.spin_ar_num)
         ar_layout.addWidget(QLabel(":"))
@@ -71,49 +100,173 @@ class PreviewPane(QWidget):
 
         # State
         self.bg_color = "#B0C4DE"
+        self.overrides = {}
+        self.renderer = None
+        self.current_cue = None
 
         # Padding state (mirrors the Global Overrides settings)
         self.pad_use = False
         self.pad_v = 0.0
         self.pad_h = 0.0
 
-        self.update_background_layer()
+        # Output / video state
+        self.viewport_res = (1920, 1080)
+        self.video_path = None
+        self.frame_path = None
 
-        # --- FIX 1: Initialize overrides so it exists ---
-        self.overrides = {}
+        self._extractor = VideoFrameExtractor()
+        self.popout = None
+
+        # Cache of the last HTML pushed to each layer so a freshly-opened
+        # popout can be brought up to date immediately. value: (html, base_url|None)
+        self._last_html = {name: ("", None) for name in LAYERS}
 
         self.btn_bg_color.clicked.connect(self.pick_color)
-        self.renderer = None
-        self.current_cue = None
+
+        # Initial paint
+        self.update_background_layer()
+        self.update_video_layer()
+        self.update_overlay_layer()
         print("[DEBUG] PreviewPane initialized.")
 
-    def update_background_layer(self):
-        """
-        Generates the Background Layer HTML.
-        This draws a 16:9 Black container, and inside it,
-        the 'Active Area' colored box based on the AR settings.
-        """
-        num = self.spin_ar_num.value()
-        den = self.spin_ar_den.value()
+    # ------------------------------------------------------------------ #
+    #  Layer plumbing
+    # ------------------------------------------------------------------ #
+    def _push(self, layer, html, base_url=None):
+        """Set HTML on the local view and (if open) the popout's mirror view."""
+        self._last_html[layer] = (html, base_url)
 
-        # Avoid division by zero
-        if den == 0: den = 1
+        local = self._views[layer]
+        if base_url is not None:
+            local.setHtml(html, base_url)
+        else:
+            local.setHtml(html)
 
+        if self.popout:
+            pv = self.popout.views[layer]
+            if base_url is not None:
+                pv.setHtml(html, base_url)
+            else:
+                pv.setHtml(html)
+
+    def _fit_style(self, num, den):
+        """CSS to fit the content (active area) box inside the 16:9 matte frame."""
+        if den == 0:
+            den = 1
         target_ratio = num / den
         base_ratio = 16 / 9
-
-        # Determine CSS to fit the Colored Box inside the 16:9 Black Box
         if target_ratio > base_ratio:
-            # Wider than 16:9 -> Letterbox (Bars Top/Bottom)
-            # Width is 100%, Height is auto (constrained by aspect-ratio)
-            fit_style = "width: 100%;"
-        else:
-            # Taller/Same as 16:9 -> Pillarbox (Bars Left/Right)
-            # Height is 100%, Width is auto
-            fit_style = "height: 100%;"
+            return "width: 100%;"  # Letterbox
+        return "height: 100%;"     # Pillarbox
 
-        # Build padding boundary guides (blue = vertical edges, red = horizontal edges).
-        # Each value is the total for its axis, split evenly between the two edges.
+    # ------------------------------------------------------------------ #
+    #  Layer builders
+    # ------------------------------------------------------------------ #
+    def update_background_layer(self):
+        """Background matte: 16:9 black frame with the colored 'active area' inside."""
+        num = self.spin_ar_num.value()
+        den = self.spin_ar_den.value()
+        fit_style = self._fit_style(num, den)
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            body {{
+                margin: 0; padding: 0;
+                background-color: #111;
+                height: 100vh;
+                display: flex; justify-content: center; align-items: center;
+                overflow: hidden;
+            }}
+            .frame-16-9 {{
+                aspect-ratio: 16/9;
+                width: 100%; max-width: 100vw; max-height: 100vh;
+                background-color: black;
+                display: flex; justify-content: center; align-items: center;
+            }}
+            .active-area {{
+                background-color: {self.bg_color};
+                aspect-ratio: {num} / {den};
+                {fit_style}
+            }}
+        </style>
+        </head>
+        <body>
+            <div class="frame-16-9">
+                <div class="active-area"></div>
+            </div>
+        </body>
+        </html>
+        """
+        self._push("bg", html)
+
+    def update_video_layer(self):
+        """Video frame layer: a still from the matched video filling the active area."""
+        # Re-extract the frame for the current cue if enabled.
+        self.frame_path = None
+        if self.chk_show_frames.isChecked() and self.video_path and self.current_cue:
+            try:
+                mid_ms = (self.current_cue.start_ms + self.current_cue.end_ms) / 2.0
+                self.frame_path = self._extractor.extract(self.video_path, mid_ms)
+            except Exception as e:
+                print(f"[ERROR] Frame extraction failed: {e}")
+
+        num = self.spin_ar_num.value()
+        den = self.spin_ar_den.value()
+        fit_style = self._fit_style(num, den)
+
+        base_url = None
+        img_html = ""
+        if self.frame_path:
+            base_url = QUrl.fromLocalFile(self.frame_path)
+            # base_url points at the frame, so a bare filename resolves to it.
+            img_html = (
+                f'<img src="{os.path.basename(self.frame_path)}" '
+                f'style="width:100%; height:100%; object-fit: fill; display:block;">'
+            )
+
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <style>
+            body {{
+                margin: 0; padding: 0;
+                background: transparent;
+                height: 100vh;
+                display: flex; justify-content: center; align-items: center;
+                overflow: hidden;
+            }}
+            .frame-16-9 {{
+                aspect-ratio: 16/9;
+                width: 100%; max-width: 100vw; max-height: 100vh;
+                background: transparent;
+                display: flex; justify-content: center; align-items: center;
+            }}
+            .active-area {{
+                aspect-ratio: {num} / {den};
+                {fit_style}
+                overflow: hidden;
+            }}
+        </style>
+        </head>
+        <body>
+            <div class="frame-16-9">
+                <div class="active-area">{img_html}</div>
+            </div>
+        </body>
+        </html>
+        """
+        self._push("video", html, base_url)
+
+    def update_overlay_layer(self):
+        """Padding boundary guides (blue = vertical edges, red = horizontal edges)."""
+        num = self.spin_ar_num.value()
+        den = self.spin_ar_den.value()
+        fit_style = self._fit_style(num, den)
+
         pad_lines = ""
         if self.pad_use:
             v_inset = self.pad_v / 2.0
@@ -132,35 +285,25 @@ class PreviewPane(QWidget):
         <style>
             body {{
                 margin: 0; padding: 0;
-                background-color: #111; /* Outer GUI void */
+                background: transparent;
                 height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
+                display: flex; justify-content: center; align-items: center;
                 overflow: hidden;
             }}
-            /* The 16:9 HD Frame (The "Black Bars" Generator) */
             .frame-16-9 {{
                 aspect-ratio: 16/9;
-                width: 100%;
-                max-width: 100vw;
-                max-height: 100vh;
-                background-color: black; 
-                display: flex;
-                justify-content: center;
-                align-items: center;
+                width: 100%; max-width: 100vw; max-height: 100vh;
+                background: transparent;
+                display: flex; justify-content: center; align-items: center;
             }}
-            /* The Active Video Content Area */
             .active-area {{
                 position: relative;
-                background-color: {self.bg_color};
                 aspect-ratio: {num} / {den};
                 {fit_style}
             }}
-            /* Padding boundary guides (overlaid on the active area) */
             .pad-line {{ position: absolute; pointer-events: none; }}
-            .pad-v {{ left: 0; right: 0; border-top: 1px dashed #4aa3ff; }}   /* blue: vertical padding */
-            .pad-h {{ top: 0; bottom: 0; border-left: 1px dashed #ff4a4a; }}  /* red: horizontal padding */
+            .pad-v {{ left: 0; right: 0; border-top: 1px dashed #4aa3ff; }}
+            .pad-h {{ top: 0; bottom: 0; border-left: 1px dashed #ff4a4a; }}
         </style>
         </head>
         <body>
@@ -170,30 +313,40 @@ class PreviewPane(QWidget):
         </body>
         </html>
         """
-        self.view_bg.setHtml(html)
+        self._push("overlay", html)
 
+    def refresh_layout_layers(self):
+        """Rebuild every AR-dependent layer (matte, video, overlay)."""
+        self.update_background_layer()
+        self.update_video_layer()
+        self.update_overlay_layer()
+
+    # ------------------------------------------------------------------ #
+    #  Public API
+    # ------------------------------------------------------------------ #
     def pick_color(self):
         c = QColorDialog.getColor(QColor(self.bg_color))
         if c.isValid():
             self.bg_color = c.name()
-            # Update the HTML layer instead of the widget stylesheet
             self.update_background_layer()
 
-    def set_project(self, project, overrides, content_res=None):
+    def set_project(self, project, overrides, content_res=None, viewport_res=None, video_path=None):
         print(f"[DEBUG] set_project called with overrides: {overrides.keys() if overrides else 'None'}")
 
-        # --- FIX 2: Store overrides for later use in render_cue ---
         self.overrides = overrides or {}
 
-        # Sync padding state and refresh the boundary-line overlay
+        # Sync padding state
         self.pad_use = self.overrides.get('use_padding', False)
         self.pad_v = self.overrides.get('padding_v', 0.0)
         self.pad_h = self.overrides.get('padding_h', 0.0)
-        self.update_background_layer()
+
+        # Output size + matched video
+        if viewport_res:
+            self.viewport_res = viewport_res
+        self.video_path = video_path
 
         # Prepare arguments for the Renderer
         renderer_args = self.overrides.copy()
-
         keys_to_remove = [
             'window_bg',
             'auto_color_enabled',
@@ -202,64 +355,124 @@ class PreviewPane(QWidget):
             'force_16_9', 'remux_enabled',
             'override_ar_enabled', 'ar_num', 'ar_den',
             'cleanup_enabled', 'move_enabled', 'web_view',
-            "use_video_dims",
-            "scale_to_hd"
+            "use_video_dims", "scale_to_hd",
         ]
-
-        # We must remove 'window_bg' AND the new Auto-Color keys,
-        # otherwise HtmlRenderer will crash with a TypeError.
         for k in keys_to_remove:
-            if k in renderer_args:
-                renderer_args.pop(k)
-
-        # if 'global_alpha' in renderer_args:
-        #     alpha = renderer_args.pop('global_alpha')
-        #     self.view_fg.setWindowOpacity(alpha)
+            renderer_args.pop(k, None)
 
         try:
             print(f"[DEBUG] Initializing HtmlRenderer with content_res: {content_res}")
-            self.renderer = HtmlRenderer(
-                project,
-                content_resolution=content_res,
-                **renderer_args)
-            print("[DEBUG] Renderer initialized.")
+            self.renderer = HtmlRenderer(project, content_resolution=content_res, **renderer_args)
         except Exception as e:
             print(f"[ERROR] Renderer init failed: {e}")
             traceback.print_exc()
             return
 
+        # Keep the popout sized to the current output resolution.
+        if self.popout:
+            self.popout.set_size(self.viewport_res)
+
+        # Repaint all layers
+        self.update_background_layer()
+        self.update_overlay_layer()
         if self.current_cue:
             self.render_cue(self.current_cue)
+        else:
+            self.update_video_layer()
 
     def render_cue(self, cue=None):
-        print("[DEBUG] render_cue called")
-        if cue: self.current_cue = cue
+        if cue:
+            self.current_cue = cue
 
-        if not self.current_cue:
-            print("[DEBUG] No current cue.")
-            return
-
-        if not self.renderer:
-            print("[DEBUG] No renderer exists.")
+        if not self.current_cue or not self.renderer:
+            # Still refresh the frame layer (it may need to clear).
+            self.update_video_layer()
             return
 
         try:
-            bg_color = self.bg_color
-            print(f"[DEBUG] Using preview_bg: {bg_color}")
-
-            # 2. Call render_cue_to_html
-            # core/render.py MUST have the updated signature for this to work
-            html = self.renderer.render_cue_to_html(
-                self.current_cue,
-                preview_bg="transparent"
-            )
-
-            print(f"[DEBUG] HTML generated ({len(html)} chars). Updating WebView.")
-            self.view_fg.setHtml(html)
-
+            html = self.renderer.render_cue_to_html(self.current_cue, preview_bg="transparent")
+            self._push("fg", html)
         except Exception as e:
             print(f"[ERROR] Preview Render failed: {e}")
             traceback.print_exc()
+
+        # Frame depends on the selected cue's timestamp.
+        self.update_video_layer()
+
+    # ------------------------------------------------------------------ #
+    #  Pop-out window
+    # ------------------------------------------------------------------ #
+    def open_popout(self):
+        if self.popout:
+            self.popout.raise_()
+            self.popout.activateWindow()
+            return
+
+        self.popout = PreviewPopout(self.viewport_res)
+        self.popout.closed.connect(self._on_popout_closed)
+
+        # Bring the new window up to date with whatever the preview shows now.
+        for layer in LAYERS:
+            html, base_url = self._last_html[layer]
+            if not html:
+                continue
+            pv = self.popout.views[layer]
+            if base_url is not None:
+                pv.setHtml(html, base_url)
+            else:
+                pv.setHtml(html)
+
+        self.popout.show()
+
+    def _on_popout_closed(self):
+        self.popout = None
+
+
+class PreviewPopout(QWidget):
+    """A standalone window that mirrors the preview at the exact output resolution."""
+    closed = pyqtSignal()
+
+    def __init__(self, size):
+        super().__init__()
+        self.setStyleSheet("background-color: #202020;")
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        self.container = QWidget()
+        self.stack = QStackedLayout(self.container)
+        self.stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+
+        self.view_bg = QWebEngineView()
+        self.view_video = _transparent_view()
+        self.view_fg = _transparent_view()
+        self.view_overlay = _transparent_view()
+
+        self.views = {
+            "bg": self.view_bg,
+            "video": self.view_video,
+            "fg": self.view_fg,
+            "overlay": self.view_overlay,
+        }
+        for name in LAYERS:
+            self.stack.addWidget(self.views[name])
+
+        lay.addWidget(self.container)
+        self.set_size(size)
+
+    def set_size(self, size):
+        try:
+            w, h = int(size[0]), int(size[1])
+        except Exception:
+            w, h = 1920, 1080
+        self.container.setFixedSize(w, h)
+        # Fix the window to the exact output size so the canvas is 1:1 with the render.
+        self.setFixedSize(w, h)
+        self.setWindowTitle(f"Preview — {w} × {h} (Output Size)")
+
+    def closeEvent(self, event):
+        self.closed.emit()
+        super().closeEvent(event)
 
 
 class AspectRatioWidget(QWidget):
@@ -272,7 +485,6 @@ class AspectRatioWidget(QWidget):
         super().__init__(parent)
         self.widget = widget
         self.widget.setParent(self)
-        # Dark grey background for the empty space around the player
         self.setStyleSheet("background-color: #202020;")
 
     def resizeEvent(self, event):
@@ -280,21 +492,16 @@ class AspectRatioWidget(QWidget):
         h = self.height()
 
         target_ratio = 16.0 / 9.0
-
-        # Calculate dimensions to fit 16:9 inside the available area
-        if h == 0: return  # Prevent division by zero
+        if h == 0:
+            return
 
         if w / h > target_ratio:
-            # Available space is wider than 16:9 -> Fit to Height
             new_h = h
             new_w = int(new_h * target_ratio)
         else:
-            # Available space is taller than 16:9 -> Fit to Width
             new_w = w
             new_h = int(new_w / target_ratio)
 
-        # Center the widget
         x = (w - new_w) // 2
         y = (h - new_h) // 2
-
         self.widget.setGeometry(x, y, new_w, new_h)

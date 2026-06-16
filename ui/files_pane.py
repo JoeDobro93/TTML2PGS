@@ -527,6 +527,18 @@ class FilesPane(QWidget):
                     # FIX 14: Emit is_hdr
                     self.project_loaded.emit(data['project'], data['target_fps'], is_hdr, data['target_res'])
 
+    def get_active_video_path(self):
+        """Return the matched video path for the currently active row, or None."""
+        for row in range(self.table.rowCount()):
+            container = self.table.cellWidget(row, 0)
+            if container:
+                rb = container.findChild(QRadioButton)
+                if rb and rb.isChecked():
+                    data = self.get_row_data(row)
+                    if data:
+                        return data.get('video_path')
+        return None
+
     def on_active_changed(self, btn, checked):
         if checked:
             for row in range(self.table.rowCount()):
