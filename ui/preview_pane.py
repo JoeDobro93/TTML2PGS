@@ -593,11 +593,12 @@ class PreviewPane(QWidget):
             vf_attempts = [None]
 
         for vf in vf_attempts:
-            # libplacebo needs a Vulkan device; create one explicitly (global
-            # option, before -i) as it is more reliable than ffmpeg's auto-init.
+            # libplacebo needs a Vulkan device; create a named one explicitly
+            # (global option, before -i). On systems without working Vulkan this
+            # fails with "Failed creating Vulkan device" and we fall back.
             pre_args = []
             if vf and "libplacebo" in vf:
-                pre_args = ["-init_hw_device", "vulkan", "-filter_hw_device", "vulkan"]
+                pre_args = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"]
 
             # Input seeking (-ss before -i) is fast even on large/network files.
             # -nostdin + -y prevent the interactive overwrite prompt from hanging.
