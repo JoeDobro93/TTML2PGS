@@ -15,6 +15,7 @@ Key Responsibilities:
 
 import re
 import xml.etree.ElementTree as ET
+import html
 from typing import Optional, List, Dict, Any, Tuple
 from .models import SubtitleProject, SubtitleBody, Cue, Fragment, Style, Region
 
@@ -941,6 +942,10 @@ class WebVTTIngester:
         return 0
 
     def _parse_payload(self, text, fragments, styles, base_style, language="en"):
+        # Decode HTML entities (e.g. &nbsp; -> \u00a0, &amp; -> &) before tokenising.
+        # Handles named (&nbsp;), decimal (&#160;) and hex (&#x00A0;) forms.
+        text = html.unescape(text)
+
         tokens = VTT_TAG_RE.split(text)
 
         # Stack always starts with the base style

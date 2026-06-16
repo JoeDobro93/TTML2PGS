@@ -13,6 +13,7 @@ import threading
 import concurrent.futures
 from typing import Optional, List, Dict
 from PIL import Image
+from selenium.common.exceptions import WebDriverException
 
 from .models import SubtitleProject
 from .render import HtmlRenderer
@@ -192,21 +193,48 @@ class ImageBatcher:
         count_lock = threading.Lock()
 
         def render_chunk(chunk_items):
-            """Worker function: owns one Chrome instance and renders its assigned cues."""
-            with ImageGenerator(self.project, output_resolution=self.viewport_res) as img_gen:
+            # Recycle Chrome every N renders to bound memory growth.
+            # Empirically ~200 keeps each worker well under the crash threshold
+            # even for heavy CJK files with skew/vertical text.
+            RECYCLE_EVERY = 200
+
+            img_gen = ImageGenerator(self.project, output_resolution=self.viewport_res)
+            rendered_since_recycle = 0
+
+            def recycle():
+                nonlocal img_gen, rendered_since_recycle
+                try:
+                    img_gen.close()
+                except Exception:
+                    pass
+                img_gen = ImageGenerator(self.project, output_resolution=self.viewport_res)
+                rendered_since_recycle = 0
+
+            try:
                 for (global_idx, seq_num, filename, img_path, html, cue) in chunk_items:
-                    # Respect cancellation
                     if cancel_event and cancel_event.is_set():
                         return
 
-                    # Render via Chrome
-                    png_bytes = img_gen.get_image_bytes(html)
+                    # Proactive recycle before we hit memory issues
+                    if rendered_since_recycle >= RECYCLE_EVERY:
+                        print(f"[BATCHER] Recycling Chrome worker at cue {seq_num} (preventive)")
+                        recycle()
 
-                    # Decode and save (PIL)
+                    # Reactive recovery if Chrome dies anyway
+                    try:
+                        png_bytes = img_gen.get_image_bytes(html)
+                    except WebDriverException as e:
+                        msg = str(e).lower()
+                        if "tab crashed" in msg or "invalid session" in msg or "session deleted" in msg:
+                            print(f"[BATCHER] Chrome crashed at cue {seq_num}, rebuilding and retrying...")
+                            recycle()
+                            png_bytes = img_gen.get_image_bytes(html)  # retry once
+                        else:
+                            raise
+
                     with Image.open(io.BytesIO(png_bytes)) as img:
                         img.save(img_path)
 
-                    # Write result into pre-allocated slot — no lock needed (unique index)
                     manifest_cues[global_idx] = {
                         "id": cue.start_ms,
                         "filename": filename,
@@ -214,7 +242,6 @@ class ImageBatcher:
                         "end_ms": cue.end_ms
                     }
 
-                    # Thread-safe progress update
                     with count_lock:
                         completed_count[0] += 1
                         current = completed_count[0]
@@ -224,6 +251,13 @@ class ImageBatcher:
 
                     if progress_callback:
                         progress_callback(current, len(work_items), f"Rendering {filename}...")
+
+                    rendered_since_recycle += 1
+            finally:
+                try:
+                    img_gen.close()
+                except Exception:
+                    pass
 
         # Split work across workers using interleaved slicing so each worker gets an
         # even spread across the full duration rather than a consecutive block.
