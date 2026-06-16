@@ -182,6 +182,16 @@ class PreviewPane(QWidget):
         self.chk_show_frames.setChecked(False)
         self.chk_show_frames.toggled.connect(self.on_show_frames_toggled)
         opts_layout.addWidget(self.chk_show_frames)
+
+        self.chk_tone_map = QCheckBox("Tone Map HDR")
+        self.chk_tone_map.setToolTip(
+            "Tone map HDR/Dolby Vision frames to SDR for natural preview\n"
+            "colors (fixes the purple/green cast on Dolby Vision Profile 5).\n"
+            "No effect on SDR content. Slows down frame extraction slightly.")
+        self.chk_tone_map.setChecked(False)
+        self.chk_tone_map.toggled.connect(self.on_tone_map_toggled)
+        opts_layout.addWidget(self.chk_tone_map)
+
         opts_layout.addStretch()
         self.layout.addLayout(opts_layout)
 
@@ -223,9 +233,12 @@ class PreviewPane(QWidget):
 
         # Video frame state
         self.show_frames = False
+        self.tone_map_hdr = False
         self.video_path = None
         self._frame_uri = None          # data URI for the current cue's frame
-        self._frame_cache_key = None    # (video_path, rounded_ms) of cached frame
+        self._frame_cache_key = None    # (video_path, rounded_ms, tone_map) of cached frame
+        self._tonemap_candidates_cache = None  # probed ffmpeg tonemap chains (ordered)
+        self._tonemap_vf = None         # the chain that last worked (tried first next time)
 
         # Pop-out window (created on demand)
         self.popout_window = None
@@ -436,6 +449,14 @@ class PreviewPane(QWidget):
         else:
             self.update_background_layer()
 
+    def on_tone_map_toggled(self, checked):
+        self.tone_map_hdr = checked
+        # The cached frame was extracted with the old tone-map setting.
+        self._frame_uri = None
+        self._frame_cache_key = None
+        if self.show_frames and self.current_cue:
+            self.render_cue(self.current_cue)
+
     def _refresh_frame_for_cue(self, cue):
         """Extract (and cache) the frame for the midpoint of the given cue."""
         if not (self.show_frames and self.video_path and cue is not None):
@@ -444,13 +465,63 @@ class PreviewPane(QWidget):
             return
 
         midpoint_ms = (cue.start_ms + cue.end_ms) / 2.0
-        cache_key = (self.video_path, round(midpoint_ms))
+        # Tone-map state is part of the key so toggling re-extracts the frame.
+        cache_key = (self.video_path, round(midpoint_ms), self.tone_map_hdr)
         if cache_key == self._frame_cache_key and self._frame_uri:
             return  # already have this frame
 
         uri = self._extract_frame_data_uri(self.video_path, midpoint_ms / 1000.0)
         self._frame_uri = uri
         self._frame_cache_key = cache_key if uri else None
+
+    def _tonemap_candidates(self):
+        """
+        Ordered list of ffmpeg -vf tone-mapping chains to try, best first.
+
+        Probed against the installed ffmpeg once and cached. libplacebo is
+        preferred: it applies the Dolby Vision RPU (fixing the purple/green cast
+        on DV Profile 5, which the zscale/tonemap chain cannot do) and handles
+        HDR10/HLG. The zscale chain is the fallback for HDR10/HLG. Both are
+        transfer-aware, so SDR input passes through essentially unchanged.
+
+        A chain can be *listed* by ffmpeg yet fail at runtime (e.g. libplacebo
+        with no Vulkan device), so the extractor tries them in order and an
+        empty chain (untone-mapped) is always the last resort.
+        """
+        if self._tonemap_candidates_cache is not None:
+            return self._tonemap_candidates_cache
+
+        available = ""
+        try:
+            probe = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-filters"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                creationflags=_NO_WINDOW,
+            )
+            # The filter list is plain ASCII; ignore any stray bytes.
+            available = probe.stdout.decode("ascii", errors="ignore")
+        except Exception as e:
+            print(f"[FRAME] Could not probe ffmpeg filters: {e}")
+
+        candidates = []
+        if " libplacebo " in available:
+            candidates.append(
+                "libplacebo=tonemapping=bt.2390:colorspace=bt709:"
+                "color_primaries=bt709:color_trc=bt709,format=yuv420p")
+        if " zscale " in available and " tonemap " in available:
+            candidates.append(
+                "zscale=t=linear:npl=100,format=gbrpf32le,"
+                "zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+                "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+        # Last resort: no filter (frame shown untone-mapped) so the user still
+        # gets a positioning reference even if no tone-mapper works.
+        candidates.append("")
+
+        self._tonemap_candidates_cache = candidates
+        return candidates
 
     def _extract_frame_data_uri(self, video_path, timestamp_seconds):
         """Grab a single frame via ffmpeg and return it as a data URI (or None)."""
@@ -461,51 +532,78 @@ class PreviewPane(QWidget):
         tmp_path = os.path.join(
             tempfile.gettempdir(), f"ttml2pgs_preview_{os.getpid()}.jpg"
         )
-        # Input seeking (-ss before -i) is fast even on large/network files.
-        # -nostdin + -y prevent the interactive overwrite prompt from hanging.
-        cmd = [
-            "ffmpeg", "-nostdin", "-y",
-            "-ss", f"{timestamp_seconds:.3f}",
-            "-i", video_path,
-            "-frames:v", "1",
-            "-q:v", "2",
-            tmp_path,
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=20,
-                creationflags=_NO_WINDOW,
-            )
-        except subprocess.TimeoutExpired:
-            print(f"[FRAME] ffmpeg timed out for {video_path} @ {timestamp_seconds:.3f}s")
-            return None
-        except FileNotFoundError:
-            print("[FRAME] ffmpeg not found on PATH.")
-            return None
-        except Exception as e:
-            print(f"[FRAME] ffmpeg failed: {e}")
-            return None
 
-        if result.returncode != 0 or not os.path.exists(tmp_path):
-            print(f"[FRAME] ffmpeg returned {result.returncode}")
-            return None
+        # Build the list of -vf chains to attempt. Without tone mapping this is
+        # just [None]; with it, try the known-good chain first (if one already
+        # worked), then the remaining probed candidates.
+        if self.tone_map_hdr:
+            vf_attempts = list(self._tonemap_candidates())
+            if self._tonemap_vf is not None and self._tonemap_vf in vf_attempts:
+                vf_attempts.remove(self._tonemap_vf)
+                vf_attempts.insert(0, self._tonemap_vf)
+        else:
+            vf_attempts = [None]
 
-        try:
-            with open(tmp_path, "rb") as fh:
-                encoded = base64.b64encode(fh.read()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
-        except Exception as e:
-            print(f"[FRAME] Failed reading frame: {e}")
-            return None
-        finally:
+        for vf in vf_attempts:
+            # Input seeking (-ss before -i) is fast even on large/network files.
+            # -nostdin + -y prevent the interactive overwrite prompt from hanging.
+            cmd = [
+                "ffmpeg", "-nostdin", "-y",
+                "-ss", f"{timestamp_seconds:.3f}",
+                "-i", video_path,
+                "-frames:v", "1",
+            ]
+            if vf:
+                cmd += ["-vf", vf]
+            cmd += ["-q:v", "2", tmp_path]
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    creationflags=_NO_WINDOW,
+                )
+            except subprocess.TimeoutExpired:
+                print(f"[FRAME] ffmpeg timed out for {video_path} @ {timestamp_seconds:.3f}s")
+                return None
+            except FileNotFoundError:
+                print("[FRAME] ffmpeg not found on PATH.")
+                return None
+            except Exception as e:
+                print(f"[FRAME] ffmpeg failed: {e}")
+                return None
+
+            if result.returncode == 0 and os.path.exists(tmp_path) \
+                    and os.path.getsize(tmp_path) > 0:
+                # Remember the chain that worked so later frames skip the duds.
+                if self.tone_map_hdr:
+                    self._tonemap_vf = vf
+                try:
+                    with open(tmp_path, "rb") as fh:
+                        encoded = base64.b64encode(fh.read()).decode("ascii")
+                    return f"data:image/jpeg;base64,{encoded}"
+                except Exception as e:
+                    print(f"[FRAME] Failed reading frame: {e}")
+                    return None
+                finally:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+            # This chain failed; clean up any partial file and try the next one.
+            if vf:
+                print(f"[FRAME] tone-map chain failed (rc={result.returncode}), trying fallback.")
             try:
                 os.remove(tmp_path)
             except OSError:
                 pass
+
+        print("[FRAME] All extraction attempts failed.")
+        return None
 
     # =========================================================================
     # PROJECT / RENDER
