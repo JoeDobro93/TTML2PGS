@@ -192,6 +192,14 @@ class PreviewPane(QWidget):
         self.chk_tone_map.toggled.connect(self.on_tone_map_toggled)
         opts_layout.addWidget(self.chk_tone_map)
 
+        self.chk_show_regions = QCheckBox("Show Regions")
+        self.chk_show_regions.setToolTip(
+            "Draw the outline and name of every region on top of the preview,\n"
+            "each in a distinct readable colour. Useful for checking layout.")
+        self.chk_show_regions.setChecked(False)
+        self.chk_show_regions.toggled.connect(self.on_show_regions_toggled)
+        opts_layout.addWidget(self.chk_show_regions)
+
         opts_layout.addStretch()
         self.layout.addLayout(opts_layout)
 
@@ -240,6 +248,7 @@ class PreviewPane(QWidget):
 
         # Video frame state
         self.show_frames = False
+        self.show_regions = False
         self.tone_map_hdr = False
         self.video_path = None
         self._frame_uri = None          # data URI for the current cue's frame
@@ -486,6 +495,13 @@ class PreviewPane(QWidget):
             self.render_cue(self.current_cue)
         else:
             self.update_background_layer()
+
+    def on_show_regions_toggled(self, checked):
+        self.show_regions = checked
+        if self.renderer is not None:
+            self.renderer.show_regions = checked
+        if self.current_cue:
+            self.render_cue(self.current_cue)
 
     def on_tone_map_toggled(self, checked):
         self.tone_map_hdr = checked
@@ -746,6 +762,7 @@ class PreviewPane(QWidget):
             self.renderer = HtmlRenderer(
                 project,
                 content_resolution=content_res,
+                show_regions=self.show_regions,
                 **renderer_args)
             print("[DEBUG] Renderer initialized.")
         except Exception as e:

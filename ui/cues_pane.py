@@ -222,6 +222,8 @@ class CuesPane(QWidget):
             self.cmb_filter_region.addItems(region_names)
             self.cmb_filter_region.blockSignals(False)
 
+            self.region_map = region_map
+
             self.model = CuesModel(project.body.cues, region_map)
             self.proxy.setSourceModel(self.model)
 
@@ -233,8 +235,8 @@ class CuesPane(QWidget):
             if self.table.selectionModel():
                 self.table.selectionModel().selectionChanged.connect(self.on_selection_change)
 
-            delegate = RegionDelegate(region_names, self.table)
-            self.table.setItemDelegateForColumn(2, delegate)
+            self.region_delegate = RegionDelegate(region_names, self.table)
+            self.table.setItemDelegateForColumn(2, self.region_delegate)
 
             self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
             self.table.setColumnWidth(0, 30)
@@ -245,6 +247,34 @@ class CuesPane(QWidget):
         except Exception as e:
             print(f"[ERROR] CuesPane.load_project crash: {e}")
             traceback.print_exc()
+
+    def refresh_regions(self):
+        """
+        Rebuild the region filter dropdown and the in-table region selector after
+        regions are added/renamed/removed in the Settings pane. The CuesModel's
+        region_map is the SAME dict as project.regions, so newly added regions are
+        already assignable; we only need to refresh the visible choice lists.
+        """
+        project = getattr(self, 'project', None)
+        if project is None or not hasattr(project, 'regions'):
+            return
+
+        region_names = list(project.regions.keys())
+        self.region_map = project.regions
+
+        # Filter dropdown (preserve current selection if it still exists).
+        current = self.cmb_filter_region.currentText()
+        self.cmb_filter_region.blockSignals(True)
+        self.cmb_filter_region.clear()
+        self.cmb_filter_region.addItem("All Regions")
+        self.cmb_filter_region.addItems(region_names)
+        idx = self.cmb_filter_region.findText(current)
+        self.cmb_filter_region.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_filter_region.blockSignals(False)
+
+        # In-table selector (the editable "Region" column).
+        if hasattr(self, 'region_delegate') and self.region_delegate is not None:
+            self.region_delegate.region_names = region_names
 
     def on_region_filter_changed(self, text):
         self.proxy.set_region_filter(text)

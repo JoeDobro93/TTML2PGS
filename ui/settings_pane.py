@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (QWidget, QTabWidget, QFormLayout, QCheckBox,
                              QDoubleSpinBox, QComboBox, QPushButton, QHBoxLayout,
                              QLabel, QColorDialog, QVBoxLayout, QGroupBox,
-                             QStyleFactory, QScrollArea, QListWidget, QLineEdit, QSplitter)
+                             QStyleFactory, QScrollArea, QListWidget, QLineEdit, QSplitter,
+                             QInputDialog, QMessageBox)
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QColor, QPalette
 
@@ -9,12 +10,20 @@ from core.models import Style, Region
 
 class SettingsPane(QWidget):
     settings_changed = pyqtSignal(dict)
+    # Emitted when the set of regions changes (add/rename/delete) so the Cues
+    # pane can refresh its region filter and in-table selector.
+    regions_changed = pyqtSignal()
 
     def __init__(self):
         super().__init__()
 
         self.current_project = None
         self.editors = {}
+
+        # Values shown (greyed-out, unchecked) in Style/Initials editor rows that
+        # are inheriting, so that checking a row starts from a sensible default
+        # instead of 0. Refreshed per project language in load_project().
+        self._style_display_defaults = Style.get_system_defaults("en")
 
         self.setStyleSheet("""
                     QCheckBox { color: #E0E0E0; spacing: 5px; }
@@ -77,25 +86,49 @@ class SettingsPane(QWidget):
         """Called by MainWindow when a new project is ingested."""
         self.current_project = project
 
+        # Display fallbacks shown in inheriting (unchecked) rows, in the project
+        # language so e.g. the CJK font stack appears for Japanese files.
+        self._style_display_defaults = Style.get_system_defaults(
+            getattr(project, "language", "en") or "en")
+
         # 1. Load Initials
         # If project has an initial_style, load it. Otherwise clear.
         if project.initial_style:
-            self.populate_editor_form(self.initials_form, project.initial_style)
+            self.populate_editor_form(self.initials_form, project.initial_style,
+                                      defaults=self._style_display_defaults)
             self.initials_tab.setEnabled(True)
         else:
             self.initials_tab.setEnabled(False)
 
         # 2. Load Styles List
-        self.list_styles.clear()
-        if project.styles:
-            for style_id in sorted(project.styles.keys()):
-                self.list_styles.addItem(style_id)
+        self._reload_style_list()
 
         # 3. Load Regions List
+        self._reload_region_list()
+
+    def _reload_style_list(self, select=None):
+        self.list_styles.blockSignals(True)
+        self.list_styles.clear()
+        if self.current_project and self.current_project.styles:
+            for style_id in sorted(self.current_project.styles.keys()):
+                self.list_styles.addItem(style_id)
+        self.list_styles.blockSignals(False)
+        if select is not None:
+            items = self.list_styles.findItems(select, Qt.MatchFlag.MatchExactly)
+            if items:
+                self.list_styles.setCurrentItem(items[0])
+
+    def _reload_region_list(self, select=None):
+        self.list_regions.blockSignals(True)
         self.list_regions.clear()
-        if project.regions:
-            for region_id in sorted(project.regions.keys()):
+        if self.current_project and self.current_project.regions:
+            for region_id in sorted(self.current_project.regions.keys()):
                 self.list_regions.addItem(region_id)
+        self.list_regions.blockSignals(False)
+        if select is not None:
+            items = self.list_regions.findItems(select, Qt.MatchFlag.MatchExactly)
+            if items:
+                self.list_regions.setCurrentItem(items[0])
 
     def setup_globals_ui(self):
         layout = QFormLayout(self.globals_tab)
@@ -531,9 +564,31 @@ class SettingsPane(QWidget):
         layout = QHBoxLayout(self.styles_tab)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: List of Styles
+        # Left: List of Styles + management buttons
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        hint = QLabel("Checked attributes override the Initials.\nUnchecked attributes are inherited.")
+        hint.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint.setWordWrap(True)
+        left_layout.addWidget(hint)
+
         self.list_styles = QListWidget()
         self.list_styles.currentRowChanged.connect(self.on_style_selected)
+        left_layout.addWidget(self.list_styles)
+
+        btn_row = QHBoxLayout()
+        self.btn_add_style = QPushButton("Add")
+        self.btn_rename_style = QPushButton("Rename")
+        self.btn_del_style = QPushButton("Delete")
+        self.btn_add_style.clicked.connect(self.on_add_style)
+        self.btn_rename_style.clicked.connect(self.on_rename_style)
+        self.btn_del_style.clicked.connect(self.on_delete_style)
+        btn_row.addWidget(self.btn_add_style)
+        btn_row.addWidget(self.btn_rename_style)
+        btn_row.addWidget(self.btn_del_style)
+        left_layout.addLayout(btn_row)
 
         # Right: Properties Form
         scroll = QScrollArea()
@@ -545,7 +600,7 @@ class SettingsPane(QWidget):
 
         scroll.setWidget(container)
 
-        splitter.addWidget(self.list_styles)
+        splitter.addWidget(left_panel)
         splitter.addWidget(scroll)
         splitter.setSizes([200, 600])
 
@@ -557,14 +612,19 @@ class SettingsPane(QWidget):
         # Helper to add row
         def add(label, attr, kind, options=None):
             editor = AttributeEditor(label, attr, kind, options)
-            editor.value_changed.connect(lambda val, a=attr: self.update_current_object(a, val))
+            editor.value_changed.connect(
+                lambda val, a=attr, lay=layout: self.update_bound_object(lay, a, val))
             layout.addRow(editor)
             # Store reference in the layout's parent widget for population later?
             # Actually better to store on the layout or a dict keyed by layout
             if not hasattr(layout, "editors"): layout.editors = {}
             layout.editors[attr] = editor
 
+        def header(text):
+            self._add_section_header(layout, text)
+
         # -- Fonts --
+        header("Fonts")
         add("Font Family (comma sep)", "font_family", "text_list")
         add("Font Size", "font_size", "float")
         add("Font Size Unit", "font_size_unit", "combo", ["vh", "px", "em", "%", "rh"])
@@ -572,12 +632,14 @@ class SettingsPane(QWidget):
         add("Font Style", "font_style", "combo", ["normal", "italic"])
 
         # -- Colors --
+        header("Colors")
         add("Color", "color", "color")
         add("Background Color", "background_color", "color")
         add("Opacity (0.0 - 1.0)", "opacity", "float", {"min": 0.0, "max": 1.0, "step": 0.1})
         add("Show Background", "show_background", "combo", ["always", "whenActive"])
 
         # -- Layout --
+        header("Layout")
         add("Origin X", "origin_x", "float")
         add("Origin X Unit", "origin_x_unit", "combo", ["%", "px", "vh", "vw"])
         add("Origin Y", "origin_y", "float")
@@ -588,17 +650,20 @@ class SettingsPane(QWidget):
         add("Extent Height Unit", "extent_height_unit", "combo", ["%", "px", "vh", "vw"])
 
         # -- Align / Writing --
+        header("Alignment / Writing Mode")
         add("Writing Mode", "writing_mode", "combo", ["lrtb", "tblr", "vertical-rl", "lr", "rl", "tb"])
         add("Text Align", "text_align", "combo", ["left", "center", "right", "start", "end"])
         add("Display Align", "display_align", "combo", ["before", "center", "after"])
         add("MultiRow Align", "multi_row_align", "combo", ["start", "center", "auto"])
 
         # -- Effects --
+        header("Outline")
         add("Outline Enabled", "outline_enabled", "bool")
         add("Outline Color", "outline_color", "color")
         add("Outline Width", "outline_width", "float")
         add("Outline Unit", "outline_unit", "combo", ["px", "%", "em"])
 
+        header("Shadow")
         add("Shadow Enabled", "shadow_enabled", "bool")
         add("Shadow Color", "shadow_color", "color")
         add("Shadow X", "shadow_offset_x", "float")
@@ -609,10 +674,12 @@ class SettingsPane(QWidget):
         add("Shear/Skew Angle", "skew_angle", "float")
 
         # -- Spacing / Ruby --
+        header("Spacing")
         add("Line Height", "line_height", "float")
         add("Line Height Unit", "line_height_unit", "combo", ["em", "px", "%"])
         add("Padding", "padding", "text")
 
+        header("Ruby / Emphasis")
         add("Ruby Role", "ruby_role", "combo", ["container", "base", "text", "delimiter"])
         add("Ruby Align", "ruby_align", "combo",
             ["center", "space-around", "start", "distribute-letter", "distribute-space"])
@@ -622,6 +689,13 @@ class SettingsPane(QWidget):
         add("Text Emphasis Pos", "text_emphasis_position", "combo", ["over", "under", "before", "after"])
         add("Text Emphasis Color", "text_emphasis_color", "color")
 
+    def _add_section_header(self, layout, text):
+        lbl = QLabel(text.upper())
+        lbl.setStyleSheet(
+            "color: #cfcfcf; font-weight: bold; font-size: 11px; "
+            "margin-top: 8px; border-bottom: 1px solid #4a4a4a; padding-bottom: 2px;")
+        layout.addRow(lbl)
+
     def on_style_selected(self, row):
         if not self.current_project: return
         item = self.list_styles.currentItem()
@@ -630,16 +704,97 @@ class SettingsPane(QWidget):
         style_id = item.text()
         style = self.current_project.styles.get(style_id)
         if style:
-            self.active_object = style  # Track what we are editing
-            self.populate_editor_form(self.styles_form, style)
+            self.populate_editor_form(self.styles_form, style,
+                                      defaults=self._style_display_defaults)
+
+    # --- STYLE MANAGEMENT ---
+    def on_add_style(self):
+        if not self.current_project:
+            return
+        name, ok = QInputDialog.getText(self, "Add Style", "New style name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if name in self.current_project.styles:
+            QMessageBox.warning(self, "Add Style", f"A style named '{name}' already exists.")
+            return
+        # New styles start fully inherited: every attribute None (unchecked), so
+        # they use the Initials until the user checks specific overrides.
+        self.current_project.styles[name] = Style(id=name)
+        self._reload_style_list(select=name)
+        self.emit_change()
+
+    def on_rename_style(self):
+        item = self.list_styles.currentItem()
+        if not item or not self.current_project:
+            return
+        old = item.text()
+        new, ok = QInputDialog.getText(self, "Rename Style", "New name:", text=old)
+        if not ok:
+            return
+        new = new.strip()
+        if not new or new == old:
+            return
+        if new in self.current_project.styles:
+            QMessageBox.warning(self, "Rename Style", f"A style named '{new}' already exists.")
+            return
+        style = self.current_project.styles.pop(old)
+        style.id = new
+        self.current_project.styles[new] = style
+        # Keep any cue fragments that referenced this style id linked.
+        for cue in self.current_project.body.cues:
+            for frag in cue.fragments:
+                frag.applied_style_ids = [new if i == old else i for i in frag.applied_style_ids]
+        self._reload_style_list(select=new)
+        self.emit_change()
+
+    def on_delete_style(self):
+        item = self.list_styles.currentItem()
+        if not item or not self.current_project:
+            return
+        old = item.text()
+        if QMessageBox.question(self, "Delete Style",
+                                f"Delete style '{old}'?") != QMessageBox.StandardButton.Yes:
+            return
+        self.current_project.styles.pop(old, None)
+        for cue in self.current_project.body.cues:
+            for frag in cue.fragments:
+                frag.applied_style_ids = [i for i in frag.applied_style_ids if i != old]
+        self.styles_form.bound_obj = None
+        self._reload_style_list()
+        self.emit_change()
 
     def setup_regions_ui(self):
         layout = QHBoxLayout(self.regions_tab)
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Left: List of Regions
+        # Left: List of Regions + management buttons
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        hint = QLabel("Added regions appear in the Cues pane\nregion selector and 'Show Regions' overlay.")
+        hint.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        hint.setWordWrap(True)
+        left_layout.addWidget(hint)
+
         self.list_regions = QListWidget()
         self.list_regions.currentRowChanged.connect(self.on_region_selected)
+        left_layout.addWidget(self.list_regions)
+
+        btn_row = QHBoxLayout()
+        self.btn_add_region = QPushButton("Add")
+        self.btn_rename_region = QPushButton("Rename")
+        self.btn_del_region = QPushButton("Delete")
+        self.btn_add_region.clicked.connect(self.on_add_region)
+        self.btn_rename_region.clicked.connect(self.on_rename_region)
+        self.btn_del_region.clicked.connect(self.on_delete_region)
+        btn_row.addWidget(self.btn_add_region)
+        btn_row.addWidget(self.btn_rename_region)
+        btn_row.addWidget(self.btn_del_region)
+        left_layout.addLayout(btn_row)
 
         # Right: Properties Form
         scroll = QScrollArea()
@@ -651,7 +806,7 @@ class SettingsPane(QWidget):
 
         scroll.setWidget(container)
 
-        splitter.addWidget(self.list_regions)
+        splitter.addWidget(left_panel)
         splitter.addWidget(scroll)
         splitter.setSizes([200, 600])
 
@@ -660,12 +815,17 @@ class SettingsPane(QWidget):
     def build_region_form(self, layout):
         def add(label, attr, kind, options=None):
             editor = AttributeEditor(label, attr, kind, options)
-            editor.value_changed.connect(lambda val, a=attr: self.update_current_object(a, val))
+            editor.value_changed.connect(
+                lambda val, a=attr, lay=layout: self.update_bound_object(lay, a, val))
             layout.addRow(editor)
             if not hasattr(layout, "editors"): layout.editors = {}
             layout.editors[attr] = editor
 
+        def header(text):
+            self._add_section_header(layout, text)
+
         # -- Position --
+        header("Position")
         add("X", "x", "float")
         add("X Unit", "x_unit", "combo", ["%", "px", "vh", "vw"])
         add("X Edge (Anchor)", "x_edge", "combo", ["left", "right", "center"])
@@ -675,16 +835,19 @@ class SettingsPane(QWidget):
         add("Y Edge (Anchor)", "y_edge", "combo", ["top", "bottom", "center"])
 
         # -- Size --
+        header("Size")
         add("Width", "width", "float")
         add("Width Unit", "width_unit", "combo", ["%", "px", "vh", "vw"])
         add("Height", "height", "float")
         add("Height Unit", "height_unit", "combo", ["%", "px", "vh", "vw"])
 
         # -- Align --
+        header("Alignment")
         add("Align Vertical", "align_vertical", "combo", ["top", "center", "bottom", "after", "before"])
         add("Align Horizontal", "align_horizontal", "combo", ["left", "center", "right", "start", "end"])
 
         # -- Visuals --
+        header("Visuals")
         add("Z Index", "z_index", "float", {"step": 1})
         add("Background Color", "background_color", "color")
         add("Opacity", "opacity", "float", {"min": 0.0, "max": 1.0})
@@ -700,28 +863,93 @@ class SettingsPane(QWidget):
         region_id = item.text()
         region = self.current_project.regions.get(region_id)
         if region:
-            self.active_object = region
             self.populate_editor_form(self.regions_form, region)
 
+    # --- REGION MANAGEMENT ---
+    def on_add_region(self):
+        if not self.current_project:
+            return
+        name, ok = QInputDialog.getText(self, "Add Region", "New region name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if name in self.current_project.regions:
+            QMessageBox.warning(self, "Add Region", f"A region named '{name}' already exists.")
+            return
+        # Sensible default: a bottom-centred caption box within the safe area.
+        r = Region(id=name)
+        r.x = 50.0; r.x_unit = "%"; r.x_edge = "center"
+        r.y = 8.0; r.y_unit = "%"; r.y_edge = "bottom"
+        r.width = 80.0; r.width_unit = "%"
+        r.height = 20.0; r.height_unit = "%"
+        r.align_horizontal = "center"
+        r.align_vertical = "bottom"
+        self.current_project.regions[name] = r
+        self._reload_region_list(select=name)
+        self.regions_changed.emit()
+        self.emit_change()
+
+    def on_rename_region(self):
+        item = self.list_regions.currentItem()
+        if not item or not self.current_project:
+            return
+        old = item.text()
+        new, ok = QInputDialog.getText(self, "Rename Region", "New name:", text=old)
+        if not ok:
+            return
+        new = new.strip()
+        if not new or new == old:
+            return
+        if new in self.current_project.regions:
+            QMessageBox.warning(self, "Rename Region", f"A region named '{new}' already exists.")
+            return
+        region = self.current_project.regions.pop(old)
+        region.id = new
+        self.current_project.regions[new] = region
+        # cue.region holds the same object, so its id updates automatically.
+        self._reload_region_list(select=new)
+        self.regions_changed.emit()
+        self.emit_change()
+
+    def on_delete_region(self):
+        item = self.list_regions.currentItem()
+        if not item or not self.current_project:
+            return
+        old = item.text()
+        if QMessageBox.question(self, "Delete Region",
+                                f"Delete region '{old}'?") != QMessageBox.StandardButton.Yes:
+            return
+        self.current_project.regions.pop(old, None)
+        self.regions_form.bound_obj = None
+        self._reload_region_list()
+        self.regions_changed.emit()
+        self.emit_change()
+
     # --- HELPERS ---
-    def populate_editor_form(self, layout, obj):
-        """Fills the editors in the given layout with values from obj."""
+    def populate_editor_form(self, layout, obj, defaults=None):
+        """Fills the editors in the given layout with values from obj.
+
+        'defaults' (a Style) supplies the greyed-out value shown in inheriting
+        (unchecked) rows, so checking a row starts from a sensible value.
+        """
         if not hasattr(layout, "editors"): return
 
-        # We set this active object so the 'value_changed' callbacks know what to update.
-        # (For the Lists, it's set in on_selected. For Initials, we set it here).
-        if layout == self.initials_form:
-            self.active_object = obj
+        # Bind the object to THIS form so its editors write to the right target,
+        # regardless of which tab is currently focused.
+        layout.bound_obj = obj
 
         for attr, editor in layout.editors.items():
             val = getattr(obj, attr, None)
-            editor.set_value(val)
+            display_default = getattr(defaults, attr, None) if defaults is not None else None
+            editor.set_value(val, display_default)
 
-    def update_current_object(self, attr, value):
-        """Callback from AttributeEditor."""
-        if hasattr(self, 'active_object') and self.active_object:
-            # print(f"[DEBUG] Setting {attr} = {value}")
-            setattr(self.active_object, attr, value)
+    def update_bound_object(self, layout, attr, value):
+        """Callback from an AttributeEditor: write to the object bound to its form."""
+        obj = getattr(layout, "bound_obj", None)
+        if obj is not None:
+            setattr(obj, attr, value)
             self.emit_change()
 
     def update_swatch(self, lbl, hex_color):
@@ -950,33 +1178,42 @@ class AttributeEditor(QWidget):
 
         self.setLayout(layout)
 
-    def set_value(self, val):
+    def set_value(self, val, display_default=None):
         self.block_updates = True
         if val is None:
             self.chk.setChecked(False)
             self.editor_widget.setEnabled(False)
+            # Pre-seed the (disabled) widget with a sensible default so that
+            # checking the row later starts from that value instead of 0/empty.
+            if display_default is not None:
+                self._apply_widget_value(display_default)
         else:
             self.chk.setChecked(True)
             self.editor_widget.setEnabled(True)
-
-            if self.kind == "float" or self.kind == "float_0_1":
-                self.editor_widget.setValue(float(val))
-            elif self.kind == "combo":
-                self.editor_widget.setCurrentText(str(val))
-            elif self.kind == "text":
-                self.editor_widget.setText(str(val))
-            elif self.kind == "text_list":
-                if isinstance(val, list):
-                    self.editor_widget.setText(", ".join(val))
-                else:
-                    self.editor_widget.setText(str(val))
-            elif self.kind == "color":
-                self.editor_widget.setText(str(val))
-                self.editor_widget.setStyleSheet(f"background-color: {val}; color: #000000;")
-            elif self.kind == "bool":
-                self.editor_widget.setChecked(bool(val))
+            self._apply_widget_value(val)
 
         self.block_updates = False
+
+    def _apply_widget_value(self, val):
+        if self.kind == "float" or self.kind == "float_0_1":
+            try:
+                self.editor_widget.setValue(float(val))
+            except (TypeError, ValueError):
+                pass
+        elif self.kind == "combo":
+            self.editor_widget.setCurrentText(str(val))
+        elif self.kind == "text":
+            self.editor_widget.setText(str(val))
+        elif self.kind == "text_list":
+            if isinstance(val, list):
+                self.editor_widget.setText(", ".join(val))
+            else:
+                self.editor_widget.setText(str(val))
+        elif self.kind == "color":
+            self.editor_widget.setText(str(val))
+            self.editor_widget.setStyleSheet(f"background-color: {val}; color: #000000;")
+        elif self.kind == "bool":
+            self.editor_widget.setChecked(bool(val))
 
     def _on_check_changed(self, state):
         enabled = (state == Qt.CheckState.Checked.value)

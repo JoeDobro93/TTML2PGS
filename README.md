@@ -30,6 +30,8 @@ Shows the current cue as it will be rendered on a plain background color. May tr
 
 Aspect ratio changes here do not affect the subtitles themselves, but create pillar/letter boxing to show where the subtitles will appear if the destination is not 16:9. All .sup files are rendered as 1920x1080 images (Blu-Ray standard), but will still work as intended in most players even if the video itself is a different resolution/aspect ratio. I will likely update the program to allow custom resolution .sup files that don't conform the the blu-0ray standard.
 
+"Show Regions" overlays the outline and name of every region on the preview, each in a distinct, readable, randomly-assigned colour (hues are spread evenly so they don't bunch up). Labels are placed at the corner opposite the region's text alignment to reduce overlap, and regions sharing the exact same box are nudged a pixel apart so both outlines stay visible. This is handy for verifying layout and for positioning newly added regions.
+
 ## Settings Panel (bottom right)
 ### Global Overrides
 These override any checked attribute for the subtitle file that may be present in the source subtitle file and apply to all subtitles being rendered in the batch.
@@ -48,12 +50,20 @@ For "Remux into Video on Completion" I recommend having MKVToolNix installed. re
 
 Uncheck Clean-up Temp Files only if you need to check on how images are rendered intividually if there is a bug. These files are generated in the folder the subtitle/video files are contained in.
 
-### Initials/Styles/Regions (THESE FEATURES ARE STILL INCOMPLETE AND DON'T ENTIRELY WORK AS INTENDED - MOSTLY JUST USEFUL FOR POSITIONING OF REGIONS FOR NOW
+### Initials/Styles/Regions
+Edits in these tabs now apply live to the preview and to the rendered output. The cascade is:
+
+`system defaults -> Initials -> Style(s) -> the cue's own (inline) overrides`
+
+Each attribute row has a checkbox. **Checked** means the attribute is set and overrides whatever it inherits; **unchecked** means it is inherited (left to the level above). Unchecking a row now correctly falls back to inheritance instead of leaving a stale value baked in.
+
 #### Initials
-This mostly doesn't work, but it will at least show the defaults for the selected subtitle file.
+The project-level default style for the subtitle file (the baseline every cue starts from). For VTT files, which have no `<initial>` block, an empty editable Initials set is provided so you can still set a project-wide default. Editing an Initial attribute updates every cue that doesn't override it.
 
 #### Styles
-This is also not enitrely working as intended, but allows editing for font styles in the selected subtitle file.
+Named styles that override the Initials when applied to a cue (e.g. a default of regular white text plus an "italic" style yields italic white text). Use **Add** to create a new named style: it starts fully unchecked (inheriting everything from the Initials) but each row is pre-filled with a sensible default so checking it gives a usable value. **Rename** and **Delete** keep any cues that referenced the style in sync. (Assigning styles to individual cues from the UI is still planned; adding/naming them now means they're ready for that.)
 
 #### Regions
 Useful for adjusting regions in a specific subtitle file. "X" and "Y" adjustments are used to position the region precisely and won't affect font size scaling like aspect ratio changes do. Even when working with the aspect ratio overrides on, this can still be useful if you want a different distance to the edges.
+
+Use **Add** to create a new region (it defaults to a sensible bottom-centred caption box). New, renamed, or deleted regions immediately show up in the Cues pane's region filter and the per-cue region selector, as well as in the "Show Regions" preview overlay.

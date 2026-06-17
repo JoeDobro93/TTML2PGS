@@ -110,6 +110,7 @@ class MainWindow(QMainWindow):
 
         self.cues_pane.cue_selected.connect(lambda c: self.preview_pane.render_cue(c))
         self.settings_pane.settings_changed.connect(self.on_settings_changed)
+        self.settings_pane.regions_changed.connect(self.on_regions_changed)
 
         self.current_project = None
         self.current_is_hdr = False
@@ -293,6 +294,14 @@ class MainWindow(QMainWindow):
                                           viewport_res=viewport_res,
                                           video_res=base_res,
                                           video_path=getattr(self, 'current_video_path', ""))
+
+    def on_regions_changed(self):
+        """Regions were added/renamed/removed in the Settings pane: refresh the
+        Cues pane's region filter and in-table selector so they stay in sync."""
+        try:
+            self.cues_pane.refresh_regions()
+        except Exception as e:
+            print(f"[ERROR] on_regions_changed: {e}")
 
     def _refresh_queue_window(self):
         # Helper to ensure we always pass all 3 lists correctly

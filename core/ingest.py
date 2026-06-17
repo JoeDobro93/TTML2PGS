@@ -17,7 +17,8 @@ import re
 import xml.etree.ElementTree as ET
 import html
 from typing import Optional, List, Dict, Any, Tuple
-from .models import SubtitleProject, SubtitleBody, Cue, Fragment, Style, Region
+from .models import (SubtitleProject, SubtitleBody, Cue, Fragment, Style, Region,
+                     finalize_fragment_styles)
 
 # Global whitelist of valid language codes to prevent false positives (like "1080p")
 VALID_LANG_CODES = {
@@ -121,6 +122,10 @@ class TTMLIngester:
 
             # Begin recursion into divs and paragraphs
             self._recurse_node(body_node, project, current_style, current_ids, current_region)
+
+        # Capture each fragment's local-only overrides so the live editor can
+        # recompute styles from scratch (initials/named-style edits take effect).
+        finalize_fragment_styles(project)
 
         return project
 
@@ -640,6 +645,10 @@ class WebVTTIngester:
         base_style = Style.get_system_defaults(language=detected_lang)
         project.language = detected_lang if detected_lang else "en"
 
+        # VTT files have no <initial> block, but we expose an empty editable
+        # one so the Initials tab works as the project-level default for VTT too.
+        project.initial_style = Style(id="__GLOBAL_INITIAL__")
+
         region_cache = {}
 
         # 2. Block-Based Parsing
@@ -693,6 +702,10 @@ class WebVTTIngester:
                 base_style,
                 region_cache
             )
+
+        # Capture each fragment's local-only overrides for the live editor.
+        finalize_fragment_styles(project)
+
         return project
 
     def _detect_lang_from_filename(self, path: str) -> str:

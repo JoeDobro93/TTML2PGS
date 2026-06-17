@@ -12,11 +12,13 @@ FINAL TUNING:
     the annotation text closer to the base, overcoming line-height limitations.
 """
 
+import colorsys
 import html
 import math
+import random
 import re
 from typing import List, Tuple, Optional
-from .models import SubtitleProject, Cue, Fragment, Region, Style
+from .models import SubtitleProject, Cue, Fragment, Region, Style, resolve_fragment_style
 
 
 class HtmlRenderer:
@@ -35,11 +37,17 @@ class HtmlRenderer:
                  global_shadow_offset_x: float = 4.0, global_shadow_offset_y: float = 4.0,
                  global_shadow_blur: float = 2.0,
                  global_alpha: float = 1.0,
-                 use_padding: bool = False, padding_v: float = 0.0, padding_h: float = 0.0):
+                 use_padding: bool = False, padding_v: float = 0.0, padding_h: float = 0.0,
+                 show_regions: bool = False):
 
         self.project = project
         self.content_resolution = content_resolution
         self.debug_mode = debug_mode
+
+        # When True, the preview draws the outline + label of every region on top
+        # of the cue so the user can see where each region sits.
+        self.show_regions = show_regions
+        self._region_color_cache = None
 
         # Padding (moves the positioning reference borders inward without scaling text).
         # Each value is the TOTAL percentage on its axis, split evenly between the two edges.
@@ -73,17 +81,13 @@ class HtmlRenderer:
 
     def render_cue_to_html(self, cue: Cue, preview_bg: Optional[str] = None) -> str:
         # --- LIVE PREVIEW ---
-        # Re-apply current Named Styles from the Project to the fragments.
-        # This allows the Settings Pane to update colors/fonts instantly.
-        if self.project and self.project.styles:
+        # Recompute each fragment's final style from scratch:
+        #   system defaults -> initials -> named styles -> inline overrides
+        # so edits in the Initials / Styles tabs (including UNCHECKING an
+        # attribute to fall back to inheritance) are reflected immediately.
+        if self.project:
             for frag in cue.fragments:
-                # Iterate over the IDs that created this style (e.g. "Default", "Italic")
-                for sid in frag.applied_style_ids:
-                    if sid in self.project.styles:
-                        # Fetch the CURRENT definition from the Settings Pane/Project
-                        current_def = self.project.styles[sid]
-                        # Re-merge it onto the fragment's calculated style
-                        frag.calculated_style = frag.calculated_style.merge_from(current_def)
+                frag.calculated_style = resolve_fragment_style(self.project, frag)
         # --------------------------
 
         region_style = self._generate_region_inline_style(cue.region) if cue.region else self._generate_default_region()
@@ -91,6 +95,8 @@ class HtmlRenderer:
         # Pass the cue so we can check for specific text alignment styles
         p_style = self._generate_paragraph_style(cue, cue.region)
         content_html = self._generate_fragments_html(cue.fragments, cue.region)
+
+        regions_overlay = self._generate_regions_overlay()
 
         if self.content_resolution:
             W, H = self.content_resolution
@@ -162,10 +168,28 @@ class HtmlRenderer:
   }}
 
   .region {{
-    position: absolute; 
+    position: absolute;
     overflow: visible;
     display: flex;
     flex-direction: column;
+  }}
+
+  /* Region debug outlines (the "Show Regions" preview overlay). */
+  .region-outline {{
+    position: absolute;
+    overflow: visible;
+    pointer-events: none;
+    z-index: 50;
+  }}
+  .region-label {{
+    position: absolute;
+    font-family: Arial, sans-serif;
+    font-weight: bold;
+    white-space: nowrap;
+    pointer-events: none;
+    line-height: 1.0;
+    padding: 1px 3px;
+    text-shadow: 0 0 2px #000, 0 0 3px #000, 0 0 1px #000;
   }}
 
   p {{
@@ -244,6 +268,7 @@ class HtmlRenderer:
       <div class="region" style="{region_style}">
         <p style="{p_style}">{content_html}</p>
       </div>
+      {regions_overlay}
     </div>
   </div>
 </div>
@@ -288,7 +313,12 @@ class HtmlRenderer:
 </html>
 """
 
-    def _generate_region_inline_style(self, region: Region) -> str:
+    def _region_box_css(self, region: Region) -> Tuple[List[str], List[str]]:
+        """
+        Returns (declarations, transforms) describing ONLY a region's geometry
+        (size + position). Shared by the actual region rendering and the
+        "Show Regions" debug overlay so the outline always matches the real box.
+        """
         css = []
         transforms = []
 
@@ -342,6 +372,11 @@ class HtmlRenderer:
 
             css.append(f"top: {val}{unit}")
             transforms.append("translateY(-50%)")
+
+        return css, transforms
+
+    def _generate_region_inline_style(self, region: Region) -> str:
+        css, transforms = self._region_box_css(region)
 
         if transforms:
             css.append(f"transform: {' '.join(transforms)}")
@@ -397,6 +432,122 @@ class HtmlRenderer:
             css.append(f"background-color: {region.background_color}")
 
         return "; ".join(css)
+
+    # =========================================================================
+    # REGION DEBUG OVERLAY ("Show Regions")
+    # =========================================================================
+    def _region_colors(self) -> dict:
+        """
+        Assigns each region a distinct, readable outline colour.
+
+        Hues are spread evenly across the wheel (so colours never bunch up, e.g.
+        five near-identical blues) then shuffled with a fixed seed and given a
+        little jitter, so the assignment looks random but stays stable across
+        renders. Saturation/lightness are clamped to a bright, legible band
+        (no muddy darks) that reads well over both the matte and video frames.
+        """
+        if self._region_color_cache is not None:
+            return self._region_color_cache
+
+        ids = sorted(self.project.regions.keys()) if self.project else []
+        n = max(1, len(ids))
+        rng = random.Random(0xC0FFEE)
+
+        # Evenly spaced hues + small jitter, then shuffled.
+        hues = [((i + rng.uniform(-0.35, 0.35)) % n) / n for i in range(n)]
+        rng.shuffle(hues)
+
+        colors = {}
+        for i, rid in enumerate(ids):
+            h = hues[i] % 1.0
+            s = 0.70 + rng.uniform(0.0, 0.18)   # 0.70 - 0.88 (vivid)
+            light = 0.60 + rng.uniform(0.0, 0.08)  # 0.60 - 0.68 (bright, legible)
+            r, g, b = colorsys.hls_to_rgb(h, light, s)
+            colors[rid] = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+        self._region_color_cache = colors
+        return colors
+
+    def _region_label_corner(self, region: Region) -> Tuple[str, str]:
+        """
+        Pick the corner for a region's label, placed OPPOSITE to where the text
+        sits, so the label avoids the caption and neighbouring labels overlap
+        less. Accounts for vertical text (where horizontal align drives the main
+        flow axis).
+        """
+        av = region.align_vertical
+        if av in ("top", "before"):
+            v_side = "bottom"
+        elif av in ("bottom", "after"):
+            v_side = "top"
+        else:
+            v_side = "top"
+
+        ah = region.align_horizontal
+        if ah in ("left", "start"):
+            h_side = "right"
+        elif ah in ("right", "end"):
+            h_side = "left"
+        else:
+            h_side = "left"
+
+        return v_side, h_side
+
+    def _generate_regions_overlay(self) -> str:
+        """Build the absolutely-positioned outline + label for every region."""
+        if not (self.show_regions and self.project and self.project.regions):
+            return ""
+
+        colors = self._region_colors()
+        parts = []
+        seen = {}  # geometry signature -> how many regions already share it
+
+        for rid in sorted(self.project.regions.keys()):
+            region = self.project.regions[rid]
+            decls, transforms = self._region_box_css(region)
+            color = colors.get(rid, "#ff0000")
+
+            # If two regions resolve to the exact same box, nudge later ones by a
+            # pixel so their outlines/labels don't perfectly overlap.
+            sig = ";".join(decls) + "|" + ";".join(transforms)
+            nudge = seen.get(sig, 0)
+            seen[sig] = nudge + 1
+            if nudge:
+                transforms = transforms + [f"translate({nudge}px, {nudge}px)"]
+
+            box = list(decls)
+            if transforms:
+                box.append(f"transform: {' '.join(transforms)}")
+            box.append(f"border: 2px solid {color}")
+            box.append("box-sizing: border-box")
+            box.append(f"background-color: {self._hex_to_rgba_str(color, 0.07)}")
+
+            v_side, h_side = self._region_label_corner(region)
+            label_css = [
+                f"color: {color}",
+                "font-size: calc(var(--pvh) * 2.2)",
+                (f"{v_side}: 0"),
+                (f"{h_side}: 0"),
+            ]
+
+            parts.append(
+                f'<div class="region-outline" style="{"; ".join(box)}">'
+                f'<div class="region-label" style="{"; ".join(label_css)}">{html.escape(rid)}</div>'
+                f'</div>'
+            )
+
+        return "".join(parts)
+
+    @staticmethod
+    def _hex_to_rgba_str(hex_code: str, alpha: float) -> str:
+        h = hex_code.lstrip('#')
+        if len(h) == 6:
+            try:
+                r = int(h[0:2], 16); g = int(h[2:4], 16); b = int(h[4:6], 16)
+                return f"rgba({r}, {g}, {b}, {alpha})"
+            except ValueError:
+                pass
+        return hex_code
 
     def _generate_paragraph_style(self, cue: Cue, region: Region) -> str:
         css = []

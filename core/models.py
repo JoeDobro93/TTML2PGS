@@ -9,7 +9,7 @@ UPDATED:
 - Added `get_system_defaults` to Style class to centralize fallback styling.
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import List, Optional, Dict, Any, Tuple
 
 # --- STYLE MODEL ---
@@ -218,6 +218,14 @@ class Fragment:
     # Debugging: List of IDs that contributed to this style (e.g. ['s1', 'inline'])
     applied_style_ids: List[str] = field(default_factory=list)
 
+    # The fragment's genuine LOCAL overrides (attributes set directly on the
+    # span/cue, NOT inherited from the initials or a named style). This is what
+    # lets the live editor recompute styles from scratch every render: the final
+    # style is always  system_defaults -> initials -> named styles -> inline.
+    # Populated by finalize_fragment_styles() after ingest.
+    inline_style: Optional[Style] = None
+    style_resolved: bool = False
+
 @dataclass
 class Cue:
     """A specific event in time containing a list of text fragments."""
@@ -261,3 +269,73 @@ class SubtitleProject:
     initial_style: Optional[Style] = None
 
     body: SubtitleBody = field(default_factory=SubtitleBody)
+
+
+# --- STYLE RESOLUTION ---------------------------------------------------------
+# The list of editable Style attributes (everything except the bookkeeping 'id').
+_STYLE_ATTRS = [f.name for f in fields(Style) if f.name != "id"]
+
+
+def resolve_fragment_style(project: 'SubtitleProject', frag: 'Fragment') -> Style:
+    """
+    Rebuilds a fragment's final visual style from scratch, in cascade order:
+
+        system defaults  ->  project initials  ->  named styles  ->  inline
+
+    Because it is recomputed every call from the CURRENT project objects, editing
+    the Initials tab or a named Style (including UNCHECKING an attribute so it
+    falls back to inheritance) is reflected immediately in the preview.
+
+    Falls back to the fragment's pre-baked 'calculated_style' if the project has
+    not been finalized (e.g. older data without inline_style captured).
+    """
+    if not getattr(frag, "style_resolved", False):
+        return frag.calculated_style
+
+    base = Style.get_system_defaults(project.language or "en")
+
+    if project.initial_style:
+        base = base.merge_from(project.initial_style)
+
+    for sid in frag.applied_style_ids:
+        named = project.styles.get(sid)
+        if named is not None:
+            base = base.merge_from(named)
+
+    if frag.inline_style is not None:
+        base = base.merge_from(frag.inline_style)
+
+    return base
+
+
+def finalize_fragment_styles(project: 'SubtitleProject') -> None:
+    """
+    Post-ingest pass. For every fragment, captures its genuine LOCAL overrides
+    (the 'inline_style') by diffing its baked calculated_style against the
+    inheritance chain it would otherwise resolve to (system defaults + initials
+    + named styles). Must run BEFORE any user edits, while the project objects
+    still hold their original, file-derived values.
+    """
+    base_defaults = Style.get_system_defaults(project.language or "en")
+
+    for cue in project.body.cues:
+        for frag in cue.fragments:
+            reference = replace(base_defaults)
+            if project.initial_style:
+                reference = reference.merge_from(project.initial_style)
+            for sid in frag.applied_style_ids:
+                named = project.styles.get(sid)
+                if named is not None:
+                    reference = reference.merge_from(named)
+
+            inline = Style(id="__INLINE__")
+            calc = frag.calculated_style
+            for attr in _STYLE_ATTRS:
+                cv = getattr(calc, attr)
+                # calculated_style only ever ADDS non-None values on top of the
+                # reference chain, so a difference means a genuine local override.
+                if cv is not None and cv != getattr(reference, attr):
+                    setattr(inline, attr, cv)
+
+            frag.inline_style = inline
+            frag.style_resolved = True
