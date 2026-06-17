@@ -961,9 +961,16 @@ class WebVTTIngester:
 
         tokens = VTT_TAG_RE.split(text)
 
-        # Stack always starts with the base style
+        # Stack always starts with the base style. We keep a PARALLEL stack of the
+        # named CSS-class ids currently applied so each fragment records the actual
+        # style ids it inherits (e.g. <c.red> -> ["red"]). This lets the live editor
+        # re-resolve a fragment when its named Style is edited; without it the class
+        # attributes get baked into the fragment's inline overrides and editing the
+        # Style in the UI has no effect.
         style_stack = [base_style]
         current_style = base_style
+        id_stack = [[]]
+        current_ids = id_stack[-1]
 
         in_ruby = False
         ruby_base_buffer = ""
@@ -990,7 +997,7 @@ class WebVTTIngester:
                             fragments.append(Fragment(
                                 text=ruby_base_buffer,
                                 calculated_style=current_style,
-                                applied_style_ids=["VTT_RUBY_ORPHAN"]
+                                applied_style_ids=list(current_ids)
                             ))
 
                         in_ruby = False
@@ -1013,7 +1020,7 @@ class WebVTTIngester:
                             ruby_base=ruby_base_buffer,
                             is_ruby=True,
                             calculated_style=current_style,
-                            applied_style_ids=["VTT_RUBY"]
+                            applied_style_ids=list(current_ids)
                         ))
                         # Reset buffers for the next character in the sequence
                         ruby_base_buffer = ""
@@ -1023,48 +1030,66 @@ class WebVTTIngester:
                         in_rt = True
 
                 elif tag_name == 'br':
-                    fragments.append(Fragment(text="\n", calculated_style=current_style, applied_style_ids=["VTT_BR"]))
+                    fragments.append(Fragment(text="\n", calculated_style=current_style,
+                                              applied_style_ids=list(current_ids)))
 
                 elif tag_name == 'i':
                     if is_close:
                         # POP Style
                         if len(style_stack) > 1:
                             style_stack.pop()
+                            id_stack.pop()
                             current_style = style_stack[-1]
+                            current_ids = id_stack[-1]
                         else:
                             current_style = base_style
+                            current_ids = id_stack[-1]
                     else:
                         # PUSH Style (Apply 16% Skew)
                         # We apply skew_angle instead of font_style="italic" to mimic
                         # the tts:shear geometric slant common in IMSC/TTML workflows.
+                        # Skew is a local effect (no named style), so the id list is
+                        # carried through unchanged.
                         skew_s = Style(id="vtt_i_skew", skew_angle=16.667)
 
                         new_style = current_style.merge_from(skew_s)
                         style_stack.append(new_style)
+                        id_stack.append(list(current_ids))
                         current_style = new_style
+                        current_ids = id_stack[-1]
 
                 elif tag_name == 'c':
                     if is_close:
                         # POP Style
                         if len(style_stack) > 1:
                             style_stack.pop()
+                            id_stack.pop()
                             current_style = style_stack[-1]
+                            current_ids = id_stack[-1]
                         else:
                             # Safety: never pop the base style
                             current_style = base_style
+                            current_ids = id_stack[-1]
                     elif len(tag_parts) > 1:
-                        # PUSH Style (Merge)
+                        # PUSH Style (Merge) and record the class id so the fragment
+                        # stays linked to the editable named Style.
                         cls = tag_parts[1]
                         if cls in styles:
                             new_style = current_style.merge_from(styles[cls])
                             style_stack.append(new_style)
+                            id_stack.append(current_ids + [cls])
                             current_style = new_style
+                            current_ids = id_stack[-1]
                         else:
                             # Push duplicate of current if class not found (preserves stack depth)
                             style_stack.append(current_style)
+                            id_stack.append(list(current_ids))
+                            current_ids = id_stack[-1]
                     else:
                         # <c> with no class -> Push duplicate to preserve stack depth
                         style_stack.append(current_style)
+                        id_stack.append(list(current_ids))
+                        current_ids = id_stack[-1]
                 i += 1
             else:
                 if in_ruby:
@@ -1074,7 +1099,8 @@ class WebVTTIngester:
                         ruby_base_buffer += token
                     i += 1
                 else:
-                    processed_frags = self._parse_flattened_ruby(token, current_style, language)
+                    processed_frags = self._parse_flattened_ruby(token, current_style, language,
+                                                                 list(current_ids))
                     fragments.extend(processed_frags)
                     i += 1
 
@@ -1087,9 +1113,11 @@ class WebVTTIngester:
     def _is_katakana(self, char):
         return 0x30A0 <= ord(char) <= 0x30FF or char == 'ー'
 
-    def _parse_flattened_ruby(self, text: str, style: Style, language: str) -> List[Fragment]:
+    def _parse_flattened_ruby(self, text: str, style: Style, language: str,
+                              applied_ids: Optional[List[str]] = None) -> List[Fragment]:
         results = []
         buffer = ""
+        ids = list(applied_ids) if applied_ids else []
 
         i = 0
         while i < len(text):
@@ -1097,9 +1125,9 @@ class WebVTTIngester:
 
             if char == '\n':
                 if buffer:
-                    results.append(Fragment(text=buffer, calculated_style=style, applied_style_ids=["VTT_TEXT"]))
+                    results.append(Fragment(text=buffer, calculated_style=style, applied_style_ids=list(ids)))
                     buffer = ""
-                results.append(Fragment(text="\n", calculated_style=style, applied_style_ids=["VTT_NEWLINE"]))
+                results.append(Fragment(text="\n", calculated_style=style, applied_style_ids=list(ids)))
                 i += 1
                 continue
 
@@ -1128,14 +1156,14 @@ class WebVTTIngester:
                     if base_text:
                         if pre_text:
                             results.append(
-                                Fragment(text=pre_text, calculated_style=style, applied_style_ids=["VTT_TEXT"]))
+                                Fragment(text=pre_text, calculated_style=style, applied_style_ids=list(ids)))
 
                         results.append(Fragment(
                             text=furigana,
                             ruby_base=base_text,
                             is_ruby=True,
                             calculated_style=style,
-                            applied_style_ids=["VTT_AUTO_RUBY"]
+                            applied_style_ids=list(ids)
                         ))
                         buffer = ""
                         i = close_idx + 1
@@ -1144,6 +1172,6 @@ class WebVTTIngester:
             i += 1
 
         if buffer:
-            results.append(Fragment(text=buffer, calculated_style=style, applied_style_ids=["VTT_TEXT"]))
+            results.append(Fragment(text=buffer, calculated_style=style, applied_style_ids=list(ids)))
 
         return results

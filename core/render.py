@@ -17,6 +17,7 @@ import html
 import math
 import random
 import re
+from dataclasses import replace
 from typing import List, Tuple, Optional
 from .models import SubtitleProject, Cue, Fragment, Region, Style, resolve_fragment_style
 
@@ -493,6 +494,31 @@ class HtmlRenderer:
 
         return v_side, h_side
 
+    def _overlay_region(self, region: Region) -> Region:
+        """
+        Returns a copy of 'region' with any None (auto/shrink-wrap) width/height
+        filled with a visible extent, purely for the debug overlay. The region's
+        main flow axis spans fully; the cross axis becomes a thin band anchored at
+        the region's position, so an auto-sized line region shows as a strip rather
+        than collapsing to a point.
+        """
+        w, wu = region.width, region.width_unit
+        h, hu = region.height, region.height_unit
+        BAND = 12.0  # cross-axis thickness (% of player box)
+
+        if region.is_vertical:
+            if h is None:
+                h, hu = 100.0, "%"
+            if w is None:
+                w, wu = BAND, "%"
+        else:
+            if w is None:
+                w, wu = 100.0, "%"
+            if h is None:
+                h, hu = BAND, "%"
+
+        return replace(region, width=w, width_unit=wu, height=h, height_unit=hu)
+
     def _generate_regions_overlay(self) -> str:
         """Build the absolutely-positioned outline + label for every region."""
         if not (self.show_regions and self.project and self.project.regions):
@@ -504,7 +530,13 @@ class HtmlRenderer:
 
         for rid in sorted(self.project.regions.keys()):
             region = self.project.regions[rid]
-            decls, transforms = self._region_box_css(region)
+            # Many regions (especially VTT) shrink-wrap to their text, so width
+            # and/or height are None. A box with no size collapses to a point, so
+            # for the overlay we fill the missing axis with a visible extent: the
+            # region's MAIN flow axis spans fully (matching the VTT default size of
+            # 100%) while the cross axis gets a thin band at the anchored position.
+            ov_region = self._overlay_region(region)
+            decls, transforms = self._region_box_css(ov_region)
             color = colors.get(rid, "#ff0000")
 
             # If two regions resolve to the exact same box, nudge later ones by a
