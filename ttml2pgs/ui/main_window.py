@@ -105,7 +105,8 @@ class MainWindow(QMainWindow):
             self.queue_pane.refresh()
             self.statusBar().showMessage(
                 f'Restored {n_queue} queued job(s) from last session — '
-                f'queue is paused; use Resume to continue.', 8000)
+                f'paused. Resume continues started work; added jobs wait '
+                f'for Render all/selected.', 8000)
             self.queue.pause_all()
 
         self._save_timer = QTimer(self)
@@ -138,9 +139,13 @@ class MainWindow(QMainWindow):
         act(m_file, 'E&xit', self.close, 'Ctrl+Q')
 
         m_render = self.menuBar().addMenu('&Render')
-        act(m_render, 'Render &current file', self._render_current, 'F5')
-        act(m_render, 'Render &all files', self._render_all, 'Ctrl+F5')
+        act(m_render, 'Add &current file to queue', self._render_current,
+            'F5')
+        act(m_render, 'Add &all files to queue', self._render_all,
+            'Ctrl+F5')
         m_render.addSeparator()
+        act(m_render, '&Start queue (render all)', self._start_queue,
+            'Ctrl+R')
         act(m_render, 'Show &queue', lambda: self.queue_dock.show())
         act(m_render, '&Pause queue', self.queue.pause_all)
         act(m_render, '&Resume queue', self.queue.resume_all)
@@ -205,6 +210,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Rendering / queueing
     # ------------------------------------------------------------------ #
+    def _start_queue(self):
+        self.queue.start_all()
+        self.queue_dock.show()
+        self.queue_pane.refresh()
+
     def _render_current(self):
         if self.state.active_index >= 0:
             self._render_one(self.state.active_index)
@@ -255,7 +265,8 @@ class MainWindow(QMainWindow):
         self.queue.move_to_subs = self.state.settings.get(
             'move_to_subs_folder', False)
         self.statusBar().showMessage(
-            f'Queued {os.path.basename(settings.out_path)}', 4000)
+            f'Added {os.path.basename(settings.out_path)} to the queue — '
+            f'start it from the queue panel', 5000)
 
     def _queue_external_sup(self, video_path: str, sup_path: str):
         from ..core.parsers import detect_language_from_filename

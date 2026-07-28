@@ -32,6 +32,20 @@ from .overrides import OverrideSet, StyleOverrides
 from .raster import RenderedBlock, render_layout
 from .units import Dim, UnitContext
 
+#: Base font size when neither the document, region nor cue specifies one.
+#: v1 set the HTML body to 4.5vh and every ``em``/``%`` size multiplied
+#: against it; keeping the same base keeps v2 output the same visual size
+#: (the TTML spec default of 1c ≈ 6.67vh reads far too large for subs).
+DEFAULT_BASE_FONT_SIZE = Dim(4.5, 'vh')
+
+#: Stem darkening: Chrome (DirectWrite gamma / stem darkening) draws text
+#: noticeably heavier than linear FreeType AA. This fraction of the font
+#: size is added to every glyph's stem width so a Regular CJK face doesn't
+#: look anemic next to the v1 output. Scaled by the per-language
+#: ``weight_boost`` override.
+STEM_DARKEN_FRAC = 0.014
+STEM_DARKEN_MAX_PX = 1.6
+
 
 # --------------------------------------------------------------------------- #
 # Canvas
@@ -357,9 +371,10 @@ class CueRenderer:
         doc = self.doc
         items: List[InlineItem] = []
 
-        # root font size: TTML root = 1c (cell height)
+        # root font size: v1-compatible 4.5vh base (em/% chain from here)
         root_ctx = self.unit_ctx()
-        root_font = root_ctx.cell_h()
+        root_font = root_ctx.resolve(DEFAULT_BASE_FONT_SIZE, axis='y') \
+            or root_ctx.cell_h()
 
         base_chain = [(cue.style_refs, cue.inline_style)]
         para_computed = doc.resolve_style(base_chain, region, ov_style, lang)
@@ -525,6 +540,9 @@ class CueRenderer:
         rs.background = computed.background_color
         rs.bold = computed.font_weight in ('bold', '600', '700', '800', '900')
         rs.italic = computed.font_style in ('italic', 'oblique')
+        boost = self.overrides.for_language(lang).weight_boost
+        rs.embolden_px = min(state.font_px * STEM_DARKEN_FRAC,
+                             STEM_DARKEN_MAX_PX) * max(0.0, boost)
         rs.shear_deg = computed.shear
         rs.shear_axis = 'y' if vertical else 'x'
         rs.text_decoration = computed.text_decoration

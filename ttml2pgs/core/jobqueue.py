@@ -63,6 +63,10 @@ class RenderJob:
     lang: str = ''
     track_name: str = ''
     state: JobState = JobState.PENDING
+    #: jobs are *added* to the queue unstarted; only started jobs render.
+    #: Resume also only affects started jobs, so what you queued but never
+    #: launched stays put.
+    started: bool = False
     progress: float = 0.0
     message: str = ''
     error: str = ''
@@ -108,6 +112,10 @@ class VideoGroup:
         """True when nothing renderable is pending/running/paused."""
         return all(j.state.is_terminal() for j in self.render_jobs)
 
+    def unstarted_count(self) -> int:
+        return sum(1 for j in self.render_jobs
+                   if not j.started and not j.state.is_terminal())
+
     def wants_mux(self) -> bool:
         if not self.mux_enabled or self.video_path is None:
             return False
@@ -151,9 +159,11 @@ class QueueManager:
         return self._queue_paused
 
     def is_idle(self) -> bool:
+        """No started work outstanding (unstarted queued jobs don't count)."""
         with self._lock:
             for g in self.groups:
-                if any(not j.state.is_terminal() for j in g.render_jobs):
+                if any(j.started and not j.state.is_terminal()
+                       for j in g.render_jobs):
                     return False
                 if g.wants_mux() or g.mux_state == JobState.RUNNING:
                     return False
@@ -188,11 +198,11 @@ class QueueManager:
     def add_render(self, doc: SubtitleDocument, sub_path: str,
                    settings: RenderSettings, overrides: OverrideSet,
                    video_path: Optional[str] = None, lang: str = '',
-                   track_name: str = '') -> RenderJob:
+                   track_name: str = '', start: bool = False) -> RenderJob:
         job = RenderJob(doc=doc, sub_path=sub_path, settings=settings,
                         overrides=overrides,
                         lang=lang or (doc.language if doc else ''),
-                        track_name=track_name)
+                        track_name=track_name, started=start)
         with self._lock:
             group = self._group_for_video(video_path)
             group.render_jobs.append(job)
@@ -241,7 +251,51 @@ class QueueManager:
                 if t and t.is_alive():
                     t.join(timeout=10)
 
+    # -- starting (added ≠ started) ------------------------------------- #
+    def start_job(self, job_id: int):
+        with self._lock:
+            j = self._find_job(job_id)
+            if j is None:
+                return
+            j.started = True
+            if j.state == JobState.PAUSED:
+                j.state = JobState.PENDING
+                if j.pipeline:
+                    j.pipeline.pause_event.clear()
+        self._wake.set()
+        self._notify()
+
+    def start_group(self, group_id: int):
+        with self._lock:
+            for g in self.groups:
+                if g.id == group_id:
+                    for j in g.render_jobs:
+                        if not j.state.is_terminal():
+                            j.started = True
+                            if j.state == JobState.PAUSED:
+                                j.state = JobState.PENDING
+                                if j.pipeline:
+                                    j.pipeline.pause_event.clear()
+        self._wake.set()
+        self._notify()
+
+    def start_all(self):
+        with self._lock:
+            self._queue_paused = False
+            for g in self.groups:
+                for j in g.render_jobs:
+                    if not j.state.is_terminal():
+                        j.started = True
+                        if j.state == JobState.PAUSED:
+                            j.state = JobState.PENDING
+                            if j.pipeline:
+                                j.pipeline.pause_event.clear()
+        self._wake.set()
+        self._notify()
+
     def pause_all(self):
+        """Pause rendering: checkpoints the running job and stops picking
+        up further *started* jobs. Unstarted jobs are unaffected."""
         self._queue_paused = True
         with self._lock:
             job = self._active_render
@@ -250,11 +304,13 @@ class QueueManager:
         self._notify()
 
     def resume_all(self):
+        """Resume paused *started* work. Jobs that were only added to the
+        queue (never started) stay waiting for an explicit start."""
         self._queue_paused = False
         with self._lock:
             for g in self.groups:
                 for j in g.render_jobs:
-                    if j.state == JobState.PAUSED:
+                    if j.started and j.state == JobState.PAUSED:
                         j.state = JobState.PENDING
                         if j.pipeline:
                             j.pipeline.pause_event.clear()
@@ -268,7 +324,7 @@ class QueueManager:
                 return
             if j.state == JobState.RUNNING and j.pipeline:
                 j.pipeline.pause_event.set()
-            elif j.state == JobState.PENDING:
+            elif j.state == JobState.PENDING and j.started:
                 j.state = JobState.PAUSED
         self._notify()
 
@@ -356,6 +412,7 @@ class QueueManager:
             j = self._find_job(job_id)
             if j and j.state in (JobState.FAILED, JobState.CANCELED):
                 j.state = JobState.PENDING
+                j.started = True          # retrying implies starting
                 j.error = ''
                 j.progress = 0.0
                 j.pipeline = None
@@ -366,6 +423,10 @@ class QueueManager:
         self._notify()
 
     # ------------------------------------------------------------------ #
+    def find_job(self, job_id: int) -> Optional[RenderJob]:
+        with self._lock:
+            return self._find_job(job_id)
+
     def _find_job(self, job_id: int) -> Optional[RenderJob]:
         for g in self.groups:
             for j in g.render_jobs:
@@ -392,7 +453,7 @@ class QueueManager:
                 return None
             for g in self.groups:
                 for j in g.render_jobs:
-                    if j.state == JobState.PENDING:
+                    if j.state == JobState.PENDING and j.started:
                         return j
         return None
 
@@ -563,6 +624,7 @@ class QueueManager:
                             'lang': j.lang,
                             'track_name': j.track_name,
                             'state': j.state.value,
+                            'started': j.started,
                         } for j in g.render_jobs],
                         'external': [{
                             'sup_path': e.sup_path, 'lang': e.lang,
@@ -603,6 +665,7 @@ class QueueManager:
                         lang=jd.get('lang', ''),
                         track_name=jd.get('track_name', ''))
                     prev = jd.get('state')
+                    job.started = bool(jd.get('started', prev != 'pending'))
                     # crash recovery: done + file exists → keep done;
                     # otherwise re-queue.
                     if prev == 'done' and os.path.exists(settings.out_path):

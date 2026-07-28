@@ -24,6 +24,22 @@ COL_NAME, COL_LANG, COL_VIDEO, COL_RES, COL_HDR, COL_SRC_FPS, COL_TGT_FPS, \
     COL_CONFORM, COL_OFFSET, COL_OUT = range(10)
 
 
+def _parse_fps(text: str):
+    """'23.976', '24000/1001' or '24' → Fraction | None."""
+    from fractions import Fraction
+    from ...core.timing import normalize_fps
+    text = (text or '').strip()
+    if not text or text in ('?', '-'):
+        return None
+    try:
+        if '/' in text:
+            n, d = text.split('/')
+            return Fraction(int(n), int(d))
+        return normalize_fps(float(text))
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
 class SourcesPane(QWidget):
     session_activated = pyqtSignal(int)        # index into state.sessions
     session_changed = pyqtSignal(int)          # data edited (video/offset…)
@@ -56,9 +72,15 @@ class SourcesPane(QWidget):
             'Render only cues whose checkbox is ticked in the cue pane '
             '(applies to the render you queue next).')
         bar.addWidget(self.chk_selected_only)
-        self.b_render = QPushButton('Render selected')
-        self.b_render_all = QPushButton('Render ALL')
+        self.b_render = QPushButton('Add to queue')
+        self.b_render.setToolTip(
+            'Add the selected file to the render queue. Start it from '
+            'the queue panel (Render all / Render selected).')
+        self.b_render_all = QPushButton('Add ALL to queue')
         self.b_render_all.setStyleSheet('font-weight:bold;')
+        self.b_render_all.setToolTip(
+            'Add every open file to the render queue. Start them from '
+            'the queue panel.')
         bar.addWidget(self.b_render)
         bar.addWidget(self.b_render_all)
         lay.addLayout(bar)
@@ -134,8 +156,23 @@ class SourcesPane(QWidget):
                   ('SDR' if vi else '-'))
         if vi and vi.is_hdr:
             hdr.setForeground(QBrush(QColor('#69d26a')))
-        put(COL_SRC_FPS, fps_label(sess.doc.fps) if sess.doc.fps else '?',
-            tip='Frame rate declared by the subtitle file')
+        if sess.manual_src_fps:
+            put(COL_SRC_FPS, fps_label(sess.manual_src_fps), editable=True,
+                tip='Manually forced source frame rate (double-click to '
+                    'edit, clear to reset)')
+        elif sess.doc.fps:
+            put(COL_SRC_FPS, fps_label(sess.doc.fps), editable=True,
+                tip='Frame rate declared by the subtitle file. '
+                    'Double-click to force a different one.')
+        else:
+            vi_fps = sess.video_info.fps if sess.video_info else None
+            s = put(COL_SRC_FPS,
+                    fps_label(vi_fps) if vi_fps else '?', editable=True,
+                    tip='The subtitle file declares no frame rate — '
+                        'assumed to match the video (no conform). '
+                        'Double-click to force a source rate (e.g. 25 '
+                        'for PAL-timed subs).')
+            s.setForeground(QBrush(QColor('#8a8a8a')))
         put(COL_TGT_FPS, fps_label(sess.target_fps()), editable=True,
             tip='Target frame rate for the .sup (probed from the video). '
                 'Double-click to force a different rate — timestamps are '
@@ -233,20 +270,19 @@ class SourcesPane(QWidget):
                 pass
             self.session_changed.emit(row)
         elif col == COL_TGT_FPS:
-            from fractions import Fraction
-            from ...core.timing import normalize_fps
-            text = item.text().strip()
-            try:
-                if '/' in text:
-                    n, d = text.split('/')
-                    fps = Fraction(int(n), int(d))
-                else:
-                    fps = normalize_fps(float(text))
+            fps = _parse_fps(item.text())
+            if fps:
                 sess.manual_dst_fps = fps
                 sess.use_manual_conform = True
-            except (ValueError, ZeroDivisionError):
+            else:
                 sess.use_manual_conform = False
                 sess.manual_dst_fps = None
+            self.refresh()
+            self.session_changed.emit(row)
+        elif col == COL_SRC_FPS:
+            # forces the *source* rate; feeds the automatic conform
+            # suggestion (subtitle fps vs video fps)
+            sess.manual_src_fps = _parse_fps(item.text())
             self.refresh()
             self.session_changed.emit(row)
         elif col == COL_LANG:
@@ -268,7 +304,7 @@ class SourcesPane(QWidget):
         if row < 0:
             return
         menu = QMenu(self)
-        a_render = menu.addAction('Render this file')
+        a_render = menu.addAction('Add this file to the queue')
         a_rematch = menu.addAction('Re-match video from folder')
         a_unbind = menu.addAction('Unbind video')
         a_offset_all = menu.addAction('Copy offset to all files')

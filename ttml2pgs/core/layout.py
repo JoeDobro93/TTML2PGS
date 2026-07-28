@@ -63,12 +63,14 @@ class RunStyle:
     lang: str = ''
     ruby_scale: float = 0.5
     shear_axis: str = 'x'     # 'y' for upright glyphs in vertical flow
+    embolden_px: float = 0.0  # stem darkening (Chrome-weight compensation)
 
     def scaled(self, factor: float) -> 'RunStyle':
         import copy
         s = copy.copy(self)
         s.font_px = self.font_px * factor
         s.letter_spacing_px = self.letter_spacing_px * factor
+        s.embolden_px = self.embolden_px * factor
         return s
 
 
@@ -366,10 +368,13 @@ class LayoutEngine:
     def _shape_seg(self, text: str, face: FaceRecord, style: RunStyle,
                    vertical_upright: bool, rot90: bool, font_px: float
                    ) -> _Run:
+        # v1 set font-variant-east-asian: jis04 — request JIS2004 forms
+        features = {'jp04': True} if style.lang.startswith('ja') else None
         glyphs, adv = shape_run(text, face, font_px,
                                 vertical=vertical_upright,
                                 language=style.lang,
-                                letter_spacing_px=style.letter_spacing_px)
+                                letter_spacing_px=style.letter_spacing_px,
+                                features=features)
         return _Run(face=face, glyphs=glyphs, style=style, text=text,
                     advance=adv, rot90=rot90, font_px=font_px)
 

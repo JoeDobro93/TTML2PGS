@@ -65,7 +65,8 @@ class DocumentSession:
                 return RetimePlan.conform(src, dst)
             return None
         video_fps = self.video_info.fps if self.video_info else None
-        return suggest_conform(self.doc.fps, video_fps)
+        return suggest_conform(self.manual_src_fps or self.doc.fps,
+                               video_fps)
 
     def default_out_path(self) -> str:
         base_dir = os.path.dirname(self.video_path or self.sub_path)
@@ -101,7 +102,7 @@ class AppState:
             'move_to_subs_folder': False,
             'external_player': '',
             'external_player_args': '"{file}" /start {ms}',
-            'preview_bg': '#606060',
+            'preview_bg': '#B0C4DE',       # v1's LightSteelBlue matte
             'restore_session': True,
         }
         self._settings_path = os.path.join(config_dir(), 'settings.json')
@@ -153,6 +154,10 @@ class AppState:
             with open(self._settings_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             self.settings.update(data.get('settings', {}))
+            # migrate the pre-2.0.1 grey default (the picker never saved
+            # user choices back then, so a stored #606060 was never picked)
+            if str(self.settings.get('preview_bg', '')).lower() == '#606060':
+                self.settings['preview_bg'] = '#B0C4DE'
             ov = data.get('overrides')
             if ov:
                 self.overrides = OverrideSet.from_dict(ov)

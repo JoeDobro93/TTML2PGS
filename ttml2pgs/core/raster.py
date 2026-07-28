@@ -62,7 +62,8 @@ class GlyphCache:
                 round(g.font_px * 4) / 4,
                 g.synth_bold, g.synth_italic, round(st.shear_deg * 2) / 2,
                 g.rot90, round(g.scale_x * 100),
-                round(stroke_px * 4) / 4)
+                round(stroke_px * 4) / 4,
+                round(st.embolden_px * 8) / 8)
 
     def get(self, g: PlacedGlyph, stroke_px: float = 0.0
             ) -> Optional[GlyphBitmap]:
@@ -118,8 +119,11 @@ class GlyphCache:
             face.set_transform(Matrix(_F16, 0, 0, _F16), Vector(0, 0))
             return None
 
+        # stem darkening (Chrome-weight match) + synthetic bold on top
+        strength = int(g.style.embolden_px * 64)
         if g.synth_bold:
-            strength = int(g.font_px * 0.028 * 64)
+            strength += int(g.font_px * 0.028 * 64)
+        if strength > 0:
             freetype.FT_Outline_Embolden(
                 ctypes.byref(face.glyph.outline._FT_Outline), strength)
 

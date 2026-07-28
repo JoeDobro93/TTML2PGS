@@ -164,7 +164,7 @@ class _Stage(QWidget):
         super().__init__(parent)
         self.scene: Optional[PreviewScene] = None
         self.matte_ar: Optional[float] = None
-        self.bg_color = QColor('#606060')
+        self.bg_color = QColor('#B0C4DE')     # v1's LightSteelBlue matte
         self.show_frame = True
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
@@ -470,6 +470,11 @@ class PreviewPane(QWidget):
         self.video_res = video_res
         self.is_hdr = is_hdr
         self.app_settings = app_settings
+        bg = app_settings.get('preview_bg')
+        if bg:
+            self.stage.bg_color = QColor(bg)
+            if self.popout:
+                self.popout.stage.bg_color = QColor(bg)
         self._invalidate_renders()
         self._rebuild_cue_index()
         if video_res:
@@ -715,6 +720,7 @@ class PreviewPane(QWidget):
         if c.isValid():
             self.stage.bg_color = c
             self.stage.update()
+            self.app_settings['preview_bg'] = c.name()
             if self.popout:
                 self.popout.stage.bg_color = c
                 self.popout.stage.update()

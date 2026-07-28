@@ -46,6 +46,11 @@ class StyleOverrides:
     #: global alpha multiplier (1.0 = opaque). Applied on top of styles.
     opacity_mult: float = 1.0
 
+    #: stroke weight boost: multiplies the default stem darkening that
+    #: matches Chrome's heavier rasterization (0 = off, 1 = match v1,
+    #: 2-3 = progressively bolder without switching to a bold face).
+    weight_boost: float = 1.0
+
     override_line_height: bool = False
     line_height: Dim = field(default_factory=lambda: Dim(1.25, ''))
 

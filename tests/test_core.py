@@ -669,6 +669,9 @@ class TestPipelineAndQueue(unittest.TestCase):
                 self.assertEqual(len(q.groups), 1)
                 self.assertEqual(len(q.groups[0].render_jobs), 2)
 
+                # jobs are added unstarted: the render worker must skip them
+                self.assertIsNone(q._next_render())
+                q.start_all()
                 q.start()
                 deadline = time.time() + 120
                 while not q.is_idle() and time.time() < deadline:
@@ -687,6 +690,69 @@ class TestPipelineAndQueue(unittest.TestCase):
         finally:
             jobqueue.remux = orig
 
+    def test_unstarted_job_holds_group_mux(self):
+        """Starting one of two jobs must not mux until the other resolves."""
+        from ttml2pgs.core import jobqueue
+        from ttml2pgs.core.jobqueue import QueueManager, JobState
+
+        calls = []
+
+        def fake_remux(video, subs, replace_original=True,
+                       progress=None, cancel=None):
+            calls.append([s.path for s in subs])
+            return True, video
+
+        orig = jobqueue.remux
+        jobqueue.remux = fake_remux
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                video = os.path.join(td, 'ep1.mkv')
+                open(video, 'wb').write(b'x')
+                doc1 = load_subtitle(sample('basic.srt'))
+                doc2 = load_subtitle(sample('basic.srt'))
+                q = QueueManager(state_path=None)
+                s1 = RenderSettings(out_path=os.path.join(td, 'a.sup'))
+                s2 = RenderSettings(out_path=os.path.join(td, 'b.sup'))
+                j1 = q.add_render(doc1, 'a.srt', s1, OverrideSet(),
+                                  video_path=video, lang='en')
+                j2 = q.add_render(doc2, 'b.srt', s2, OverrideSet(),
+                                  video_path=video, lang='ja')
+                q.start_job(j1.id)
+                q.start()
+                deadline = time.time() + 60
+                while j1.state != JobState.DONE and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertEqual(j1.state, JobState.DONE)
+                time.sleep(0.8)     # give a would-be premature mux a chance
+                g = q.groups[0]
+                self.assertEqual(g.mux_state, JobState.WAITING)
+                self.assertEqual(g.unstarted_count(), 1)
+                self.assertEqual(calls, [])
+                # resolving the unstarted job (cancel) releases the mux
+                q.cancel_job(j2.id)
+                deadline = time.time() + 60
+                while not q.is_idle() and time.time() < deadline:
+                    time.sleep(0.05)
+                q.shutdown(wait=True)
+                self.assertEqual(g.mux_state, JobState.DONE)
+                self.assertEqual(calls, [[s1.out_path]])
+        finally:
+            jobqueue.remux = orig
+
+    def test_pause_resume_leave_unstarted_alone(self):
+        from ttml2pgs.core.jobqueue import QueueManager
+        q = QueueManager(state_path=None)     # workers never started
+        s = RenderSettings(out_path='x.sup')
+        j1 = q.add_render(None, sample('basic.srt'), s, OverrideSet())
+        j2 = q.add_render(None, sample('basic.srt'), s, OverrideSet())
+        q.start_job(j1.id)
+        q.pause_all()
+        q.resume_all()
+        self.assertTrue(j1.started)
+        self.assertFalse(j2.started)          # resume must not start it
+        self.assertIsNotNone(q._next_render())
+        self.assertIs(q._next_render(), j1)
+
     def test_queue_state_persistence(self):
         from ttml2pgs.core.jobqueue import QueueManager
         with tempfile.TemporaryDirectory() as td:
@@ -697,14 +763,38 @@ class TestPipelineAndQueue(unittest.TestCase):
             s = RenderSettings(out_path=sup)
             job = q.add_render(None, sample('basic.srt'), s, OverrideSet(),
                                video_path=None, lang='en')
+            job2 = q.add_render(None, sample('basic.srt'),
+                                RenderSettings(out_path=sup + '2'),
+                                OverrideSet(), video_path=None, lang='ja')
             from ttml2pgs.core.jobqueue import JobState
             job.state = JobState.DONE
+            job.started = True
             q._save_state()
 
             q2 = QueueManager(state_path=state)
             n = q2.load_state()
-            self.assertEqual(n, 1)
+            self.assertEqual(n, 2)
             self.assertEqual(q2.groups[0].render_jobs[0].state, JobState.DONE)
+            # started/unstarted survives the round-trip
+            self.assertTrue(q2.groups[0].render_jobs[0].started)
+            self.assertFalse(q2.groups[1].render_jobs[0].started)
+
+    def test_ruby_preview_text_has_parens(self):
+        try:
+            from ttml2pgs.ui.widgets.cue_table import preview_text
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        previews = [preview_text(doc, c) for c in doc.cues]
+        joined = ''.join(previews)
+        self.assertIn('(', joined)            # ruby readings visible again
+        # parenthesised text must be the annotation, right after its base
+        self.assertTrue(any('(' in p and ')' in p and
+                            p.index('(') < p.index(')') for p in previews))
+        # plain (non-ruby) cues keep their text intact
+        srt_doc = load_subtitle(sample('basic.srt'))
+        for cue in srt_doc.cues:
+            self.assertEqual(preview_text(srt_doc, cue), cue.plain_text())
 
 
 if __name__ == '__main__':

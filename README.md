@@ -17,6 +17,8 @@ reference; the new app lives entirely in `ttml2pgs/`.
 pip install -r requirements.txt
 
 python -m ttml2pgs                      # GUI
+python run_gui.py                       # same GUI, plain-script launcher
+                                        # (point IDE run configs here)
 python -m ttml2pgs render sub.ja.ttml --video movie.mkv --mux
 python -m ttml2pgs convert sub.vtt -o sub.srt
 python -m ttml2pgs inspect sub.ttml     # dump styles/regions/cues
@@ -84,6 +86,13 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   `em`, authored `px` rescaled from the document's declared pixel space),
   resolved against the output canvas — a 3px outline authored for 1080p
   renders as 6px on a 2160p canvas.
+* **v1-matched typography defaults.** Base font size is 4.5 % of the
+  content height (what v1's HTML body used — `em`/`%` sizes chain from
+  it), the Japanese fallback stack is v1's Chrome order with Yu Gothic
+  *Medium* preferred (Chromium's Windows default; plain Regular is
+  wire-thin), JIS2004 glyph forms are requested, and a light **stem
+  darkening** reproduces Chrome's heavier rasterization — tunable per
+  language via "Stroke weight boost" (0 = off, 1 = v1 look).
 
 ### PGS output
 * Native `.sup` writer, **any canvas size** (odd sizes included), BT.709
@@ -99,9 +108,15 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   "no change". Manual conform lives in Cue pane → Time tools.
 
 ### The queue (rebuilt)
+* **Added ≠ started.** The Sources pane *adds* files to the queue; the
+  queue panel's **Render all / Render selected** (or per-item context
+  menu) actually starts them. Pause checkpoints the running job between
+  cues; Resume continues only work you started — jobs sitting in
+  "added" never render behind your back.
 * Jobs are grouped **per target video**; a group's mux starts as soon as
   *its* renders finish — a crash on episode 12 no longer costs you the
-  eleven finished episodes.
+  eleven finished episodes. Unstarted jobs visibly hold their group's
+  mux ("waiting — N not started"); cancel or start them to release it.
 * Add a second subtitle for an already-queued video (even mid-render) and
   the group's mux waits for it.
 * Queue **external `.sup` files** for mux-only.

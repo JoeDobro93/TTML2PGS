@@ -84,9 +84,14 @@ _LANG_MARKERS: Dict[str, List[str]] = {
 #: default family preference per language, used for generic families and
 #: appended as fallback after author-requested families.
 _LANG_DEFAULT_STACKS: Dict[str, List[str]] = {
-    'ja': ['Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans CJK JP',
-           'Noto Sans JP', 'Source Han Sans JP', 'Yu Gothic', 'Meiryo',
-           'MS PGothic', 'IPAPGothic', 'Unifont-JP', 'Unifont JP'],
+    # v1's Chrome stack order, with 'Yu Gothic Medium' ahead of the plain
+    # family: Chromium renders Japanese with the Medium weight on Windows
+    # (Yu Gothic Regular is famously thin) — matching that keeps v2's
+    # default look as solid as the old HTML renderer.
+    'ja': ['Noto Sans CJK JP', 'Noto Sans JP', 'Hiragino Sans',
+           'Hiragino Kaku Gothic ProN', 'Yu Gothic Medium', 'Yu Gothic',
+           'Meiryo', 'Source Han Sans JP', 'MS PGothic', 'IPAPGothic',
+           'Unifont-JP', 'Unifont JP'],
     'zh-hans': ['PingFang SC', 'Noto Sans CJK SC', 'Noto Sans SC',
                 'Source Han Sans SC', 'Microsoft YaHei', 'SimHei',
                 'WenQuanYi Zen Hei', 'WenQuanYi Micro Hei'],
@@ -318,9 +323,15 @@ class FontManager:
         return sorted(seen)
 
     def _score(self, rec: FaceRecord, weight: int, italic: bool) -> int:
-        s = abs(rec.weight - weight)
+        # Prefer the heavier face when two weights are equally distant
+        # (Medium over Light for a 'normal' request): subtitle text over
+        # video should err toward solidity, and it matches Chrome's
+        # Japanese default (Yu Gothic Medium).
+        s = abs(rec.weight - weight) * 2
+        if rec.weight < weight:
+            s += 1
         if rec.italic != italic:
-            s += 500
+            s += 1000
         return s
 
     def _lookup_family(self, family: str, weight: int, italic: bool
@@ -431,11 +442,15 @@ class FontManager:
                 return rec
         return None
 
-    _LOW_QUALITY_MARKERS = ('unifont', 'lastresort')
+    #: pan-unicode bitmap fallbacks + bitmap-era CJK system fonts whose
+    #: outlines look wiry at subtitle sizes
+    _LOW_QUALITY_MARKERS = ('unifont', 'lastresort', 'msgothic', 'mspgothic',
+                            'msmincho', 'mspmincho', 'simsun', 'nsimsun',
+                            'mingliu', 'pmingliu', 'gulim', 'batang')
 
     @classmethod
     def is_low_quality(cls, rec: FaceRecord) -> bool:
-        """Pan-unicode bitmap-style fallbacks — cover everything, look bad.
+        """Fonts that cover a lot but render poorly (bitmap heritage).
         Typographic substitutions are preferred over glyphs from these."""
         n = _norm_family(' '.join(rec.families))
         return any(m in n for m in cls._LOW_QUALITY_MARKERS)

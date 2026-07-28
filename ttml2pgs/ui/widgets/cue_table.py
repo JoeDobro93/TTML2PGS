@@ -25,6 +25,43 @@ from ...core.timing import (COMMON_RATES, RetimePlan, format_display_time,
 COL_ON, COL_NUM, COL_START, COL_END, COL_DUR, COL_REGION, COL_TEXT = range(7)
 
 
+def preview_text(doc: SubtitleDocument, cue: Cue) -> str:
+    """
+    Cue text for display/filtering, with ruby annotations rendered as
+    ``base(reading)`` — v1 showed the flattened source this way and users
+    filter for ruby cues by typing ``(``.
+    """
+    region = doc.get_region(cue)
+    out: List[str] = []
+
+    def walk(node: SpanNode, chain: list):
+        for ch in node.children:
+            if ch.kind == 'text':
+                out.append(ch.text)
+            elif ch.kind == 'br':
+                out.append('\n')
+            elif ch.kind == 'span':
+                sub = chain + [(ch.style_refs, ch.inline_style)]
+                try:
+                    role = doc.resolve_style(sub, region).ruby or ''
+                except Exception:
+                    role = ''
+                if role in ('text', 'textContainer'):
+                    out.append('(')
+                    walk(ch, sub)
+                    out.append(')')
+                elif role == 'delimiter':
+                    continue
+                else:
+                    walk(ch, sub)
+
+    try:
+        walk(cue.root, [(cue.style_refs, cue.inline_style)])
+        return ''.join(out)
+    except Exception:
+        return cue.plain_text()
+
+
 class CueModel(QAbstractTableModel):
     HEADERS = ['', '#', 'Start', 'End', 'Dur', 'Region', 'Text']
 
@@ -34,18 +71,29 @@ class CueModel(QAbstractTableModel):
         super().__init__()
         self.doc: Optional[SubtitleDocument] = None
         self.cues: List[Cue] = []
+        self._previews: dict = {}          # id(cue) -> display text
 
     def set_document(self, doc: Optional[SubtitleDocument]):
         self.beginResetModel()
         self.doc = doc
         self.cues = doc.sorted_cues() if doc else []
+        self._previews.clear()
         self.endResetModel()
 
     def refresh_order(self):
         self.beginResetModel()
         if self.doc:
             self.cues = self.doc.sorted_cues()
+        self._previews.clear()
         self.endResetModel()
+
+    def preview(self, cue: Cue) -> str:
+        text = self._previews.get(id(cue))
+        if text is None:
+            text = preview_text(self.doc, cue) if self.doc \
+                else cue.plain_text()
+            self._previews[id(cue)] = text
+        return text
 
     # ------------------------------------------------------------------ #
     def rowCount(self, parent=QModelIndex()):
@@ -86,12 +134,12 @@ class CueModel(QAbstractTableModel):
             if c == COL_TEXT:
                 if role == Qt.ItemDataRole.EditRole:
                     return cue.plain_text()
-                return cue.plain_text().replace('\n', ' ⏎ ')
+                return self.preview(cue).replace('\n', ' ⏎ ')
         if role == Qt.ItemDataRole.CheckStateRole and c == COL_ON:
             return Qt.CheckState.Checked if cue.enabled \
                 else Qt.CheckState.Unchecked
         if role == Qt.ItemDataRole.ToolTipRole and c == COL_TEXT:
-            return cue.plain_text()
+            return self.preview(cue)
         return None
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
@@ -123,6 +171,7 @@ class CueModel(QAbstractTableModel):
                 return False
         elif c == COL_TEXT:
             _set_plain_text(cue, str(value))
+            self._previews.pop(id(cue), None)
         else:
             return False
         self.dataChanged.emit(index, index)
@@ -187,7 +236,8 @@ class CueFilterProxy(QSortFilterProxyModel):
             rid = cue.region_id or '(default)'
             if rid != self.region:
                 return False
-        if self.text and self.text not in cue.plain_text().lower():
+        # match against the preview text so "(" finds ruby cues
+        if self.text and self.text not in model.preview(cue).lower():
             return False
         return True
 
