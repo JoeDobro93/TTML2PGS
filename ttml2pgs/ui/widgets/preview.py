@@ -61,6 +61,9 @@ class PreviewScene:
     content: Tuple[float, float, float, float] = (0, 0, 1920, 1080)
     renders: List[RenderedCue] = None
     frame_jpeg: Optional[bytes] = None
+    #: (rid, '#rrggbb', x, y, w, h, label_corner) per region — only
+    #: populated when "Show regions" is on
+    region_boxes: Optional[List[tuple]] = None
 
 
 @dataclass
@@ -71,6 +74,98 @@ class _RenderContext:
     video_path: Optional[str]
     is_hdr: bool = False
     generation: int = 0
+    show_regions: bool = False
+
+
+def _region_overlay_colors(region_ids: List[str]) -> Dict[str, str]:
+    """
+    v1's region-overlay palette: hues spread evenly across the wheel,
+    shuffled with a fixed seed + jitter (stable across renders), clamped
+    to a bright legible band.
+    """
+    import colorsys
+    import random
+    ids = sorted(region_ids)
+    n = max(1, len(ids))
+    rng = random.Random(0xC0FFEE)
+    hues = [((i + rng.uniform(-0.35, 0.35)) % n) / n for i in range(n)]
+    rng.shuffle(hues)
+    colors = {}
+    for i, rid in enumerate(ids):
+        h = hues[i] % 1.0
+        s = 0.70 + rng.uniform(0.0, 0.18)
+        light = 0.60 + rng.uniform(0.0, 0.08)
+        r, g, b = colorsys.hls_to_rgb(h, light, s)
+        colors[rid] = f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+    return colors
+
+
+def compute_region_boxes(doc: SubtitleDocument,
+                         renderer: CueRenderer) -> List[tuple]:
+    """
+    Canvas-absolute outline boxes for every region ("Show regions").
+
+    Shrink-wrap regions (no width/height) would collapse to a point, so
+    the missing main flow axis is filled to 100% and the cross axis
+    becomes a visible band — same trick as v1. Regions resolving to the
+    exact same box get nudged a pixel so both outlines stay visible.
+    """
+    from dataclasses import replace as dc_replace
+
+    from ...core.units import Dim
+
+    colors = _region_overlay_colors(list(doc.regions.keys()))
+    boxes: List[tuple] = []
+    seen: Dict[tuple, int] = {}
+    BAND = 12.0
+
+    for rid in sorted(doc.regions.keys()):
+        region = doc.regions[rid]
+        spec = doc.specified_style(region.style_refs, region.style)
+        vertical = bool(spec.writing_mode) and \
+            spec.writing_mode.startswith('tb')
+        w, h = region.width, region.height
+        if vertical:
+            if h is None:
+                h = Dim(100.0, '%')
+            if w is None:
+                w = Dim(BAND, '%')
+        else:
+            if w is None:
+                w = Dim(100.0, '%')
+            if h is None:
+                h = Dim(BAND, '%')
+        ov = dc_replace(region, width=w, height=h)
+
+        rect = renderer._region_rect(ov)
+        rw = rect['w'] if rect['w'] is not None else 0.0
+        rh = rect['h'] if rect['h'] is not None else 0.0
+        x, y = renderer._anchor_pos(rect, rw, rh)
+
+        # clamp to the canvas: point-anchored shrink-wrap regions filled
+        # to 100% can spill far off-screen (v1's HTML just clipped them)
+        x0 = max(0.0, x)
+        y0 = max(0.0, y)
+        x1 = min(float(renderer.canvas.width), x + rw)
+        y1 = min(float(renderer.canvas.height), y + rh)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            continue
+        x, y, rw, rh = x0, y0, x1 - x0, y1 - y0
+
+        sig = (round(x), round(y), round(rw), round(rh))
+        nudge = seen.get(sig, 0)
+        seen[sig] = nudge + 1
+        x, y = x + nudge, y + nudge
+
+        # label goes to the corner opposite the text, like v1
+        da = spec.display_align or 'after'
+        ta = spec.text_align or ('start' if vertical else 'center')
+        v_side = 'bottom' if da in ('before',) else 'top'
+        h_side = 'right' if ta in ('left', 'start') else 'left'
+        boxes.append((rid, colors.get(rid, '#ff5050'),
+                      float(x), float(y), float(rw), float(rh),
+                      f'{v_side}-{h_side}'))
+    return boxes
 
 
 class _RenderWorker(QObject):
@@ -147,6 +242,11 @@ class _RenderWorker(QObject):
             scene.frame_jpeg = extract_frame(ctx.video_path,
                                              cue.begin_ms + 1.0,
                                              tone_map=tone_map)
+        if ctx.show_regions:
+            try:
+                scene.region_boxes = compute_region_boxes(ctx.doc, renderer)
+            except Exception:                          # pragma: no cover
+                scene.region_boxes = []
         self.scene_ready.emit(scene)
 
     def _do_cue(self, ctx: _RenderContext, cue: Cue):
@@ -232,6 +332,31 @@ class _Stage(QWidget):
             p.drawPixmap(int(ox + x * scale), int(oy + y * scale),
                          int(pm.width() * scale), int(pm.height() * scale),
                          pm)
+
+        for box in (self.scene.region_boxes or []):
+            rid, hexc, bx, by, bw, bh, corner = box
+            color = QColor(hexc)
+            pen = p.pen()
+            pen.setColor(color)
+            pen.setWidth(2)
+            pen.setStyle(Qt.PenStyle.SolidLine)
+            p.setPen(pen)
+            rx, ry = ox + bx * scale, oy + by * scale
+            rw, rh = bw * scale, bh * scale
+            p.drawRect(int(rx), int(ry), int(rw), int(rh))
+            f = p.font()
+            f.setBold(True)
+            f.setPixelSize(max(9, int(12 * min(1.5, scale * 3))))
+            p.setFont(f)
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(rid)
+            tx = rx + 4 if corner.endswith('left') else rx + rw - tw - 4
+            ty = ry + fm.ascent() + 3 if corner.startswith('top') \
+                else ry + rh - fm.descent() - 3
+            p.setPen(QColor(0, 0, 0, 220))
+            p.drawText(int(tx + 1), int(ty + 1), rid)
+            p.setPen(color)
+            p.drawText(int(tx), int(ty), rid)
         p.end()
 
 
@@ -252,6 +377,7 @@ class _PlayerView(QGraphicsView):
             self.video_item = QGraphicsVideoItem()
             self.scene().addItem(self.video_item)
         self._overlay_items: List[QGraphicsPixmapItem] = []
+        self._region_items: List = []
         self._canvas = (1920, 1080)
 
     def set_canvas(self, w: int, h: int):
@@ -274,6 +400,37 @@ class _PlayerView(QGraphicsView):
             item.setZValue(10)
             self.scene().addItem(item)
             self._overlay_items.append(item)
+
+    def set_region_boxes(self, boxes: Optional[List[tuple]]):
+        from PyQt6.QtGui import QFont, QPen
+        from PyQt6.QtWidgets import (QGraphicsRectItem,
+                                     QGraphicsSimpleTextItem)
+        for it in self._region_items:
+            self.scene().removeItem(it)
+        self._region_items.clear()
+        for rid, hexc, bx, by, bw, bh, corner in (boxes or []):
+            color = QColor(hexc)
+            rect = QGraphicsRectItem(bx, by, bw, bh)
+            pen = QPen(color)
+            pen.setWidth(3)
+            pen.setCosmetic(False)
+            rect.setPen(pen)
+            rect.setZValue(20)
+            self.scene().addItem(rect)
+            self._region_items.append(rect)
+            label = QGraphicsSimpleTextItem(rid)
+            f = QFont()
+            f.setBold(True)
+            f.setPixelSize(26)
+            label.setFont(f)
+            label.setBrush(color)
+            br = label.boundingRect()
+            lx = bx + 6 if corner.endswith('left') else bx + bw - br.width() - 6
+            ly = by + 4 if corner.startswith('top') else by + bh - br.height() - 4
+            label.setPos(lx, ly)
+            label.setZValue(21)
+            self.scene().addItem(label)
+            self._region_items.append(label)
 
     def _fit(self):
         self.fitInView(QRectF(0, 0, *self._canvas),
@@ -332,6 +489,51 @@ PLAYER_PRESETS = {
     'VLC': ('vlc', '--start-time={sec} "{file}"'),
     'mpv': ('mpv', '--start={sec} "{file}"'),
 }
+
+#: typical install locations probed when the executable isn't on PATH
+_PLAYER_SEARCH_SUBPATHS = {
+    'mpc-be64.exe': [r'MPC-BE\mpc-be64.exe', r'MPC-BE x64\mpc-be64.exe'],
+    'mpc-hc64.exe': [r'MPC-HC\mpc-hc64.exe',
+                     r'K-Lite Codec Pack\MPC-HC64\mpc-hc64.exe'],
+    'vlc': [r'VideoLAN\VLC\vlc.exe'],
+    'mpv': [r'mpv\mpv.exe'],
+}
+
+
+def resolve_player_exe(exe: str) -> Optional[str]:
+    """Find the actual executable: absolute path, PATH lookup, then the
+    usual Windows install folders."""
+    import shutil
+    if not exe:
+        return None
+    if os.path.isabs(exe):
+        return exe if os.path.exists(exe) else None
+    hit = shutil.which(exe)
+    if hit:
+        return hit
+    roots = [os.environ.get('ProgramFiles'),
+             os.environ.get('ProgramFiles(x86)'),
+             os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs')]
+    for sub in _PLAYER_SEARCH_SUBPATHS.get(exe.lower(), []):
+        for root in roots:
+            if root:
+                cand = os.path.join(root, sub)
+                if os.path.exists(cand):
+                    return cand
+    return None
+
+
+def build_player_command(exe_path: str, args_template: str, file: str,
+                         ms: int) -> List[str]:
+    """
+    Tokenize the *template* (not the substituted string) and fill each
+    token — the file path never passes through shlex, so Windows paths
+    with spaces/backslashes survive intact.
+    """
+    values = {'file': file, 'ms': ms, 'sec': f"{ms / 1000.0:.3f}",
+              'time': _fmt_ms(ms)}
+    toks = shlex.split(args_template or '"{file}"')
+    return [exe_path] + [t.format(**values) for t in toks]
 
 
 def _fmt_ms(ms: float) -> str:
@@ -401,13 +603,28 @@ class PreviewPane(QWidget):
         self.btn_bg = QPushButton('BG')
         self.chk_frames = QCheckBox('Video frames')
         self.chk_tonemap = QCheckBox('Tone-map HDR')
+        self.chk_regions = QCheckBox('Show regions')
+        self.chk_regions.setToolTip(
+            'Outline every region with its name, each in a distinct '
+            'color — works in stills and player mode. Useful for '
+            'checking layout.')
         for w in (self.spin_ar_w, QLabel(':'), self.spin_ar_h,
                   self.chk_matte, self.btn_bg, self.chk_frames,
-                  self.chk_tonemap):
+                  self.chk_tonemap, self.chk_regions):
             bar.addWidget(w)
         bar.addStretch()
         self.btn_popout = QPushButton('Pop out (1:1)')
+        self.btn_popout.setToolTip(
+            'Open a floating window locked to the output pixel size. '
+            'Works from player mode too (pauses playback and shows the '
+            'extracted frame behind the cue).')
         self.btn_player = QPushButton('Open in player ▸')
+        self.btn_player.setToolTip(
+            'Open the bound video in your own desktop player (MPC-BE, '
+            'VLC, mpv…) seeked to the selected cue — for checking '
+            'subtitle sync against real playback. Subtitles are NOT '
+            'overlaid there; use the embedded player or pop-out for '
+            'overlays.')
         bar.addWidget(self.btn_popout)
         bar.addWidget(self.btn_player)
         lay.addLayout(bar)
@@ -446,6 +663,7 @@ class PreviewPane(QWidget):
         self.btn_bg.clicked.connect(self._pick_bg)
         self.chk_frames.toggled.connect(lambda *_: self.schedule_render())
         self.chk_tonemap.toggled.connect(lambda *_: self.schedule_render())
+        self.chk_regions.toggled.connect(lambda *_: self.schedule_render())
         self.btn_popout.clicked.connect(self._toggle_popout)
         self.btn_player.clicked.connect(self._open_player_menu)
         self.chk_player.toggled.connect(self._player_mode_changed)
@@ -496,7 +714,8 @@ class PreviewPane(QWidget):
             return None
         return _RenderContext(self.doc, self.overrides, self.video_res,
                               self.video_path, self.is_hdr,
-                              self._generation)
+                              self._generation,
+                              show_regions=self.chk_regions.isChecked())
 
     def _invalidate_renders(self):
         self._generation += 1
@@ -533,14 +752,18 @@ class PreviewPane(QWidget):
             return
         if self._player_active():
             self._update_overlays(self._player.position(), force=True)
-        self.worker.request_scene(ctx, self.cue,
-                                  self.chk_frames.isChecked() and
-                                  not self._player_active(),
+        # the pop-out is a stills window even in player mode, so it always
+        # wants the extracted video frame behind the cue
+        want_frame = bool(self.video_path) and (
+            self.popout is not None or
+            (self.chk_frames.isChecked() and not self._player_active()))
+        self.worker.request_scene(ctx, self.cue, want_frame,
                                   self.chk_tonemap.isChecked())
 
     def _on_scene(self, scene: PreviewScene):
         self.stage.set_scene(scene)
         self.player_view.set_canvas(scene.canvas_w, scene.canvas_h)
+        self.player_view.set_region_boxes(scene.region_boxes)
         n = len(scene.renders or [])
         mode = 'player' if self._player_active() else 'stills'
         self.lbl_info.setText(
@@ -753,11 +976,16 @@ class PreviewPane(QWidget):
 
     def _open_player_menu(self):
         menu = QMenu(self)
-        act_here = menu.addAction('Open at selected cue')
+        act_here = menu.addAction('Open video at selected cue')
+        act_here.setToolTip(
+            'Launches your desktop player on the bound video, seeked to '
+            'this cue — for judging subtitle/video sync in real playback.')
         menu.addSeparator()
         preset_actions = {}
         for name in PLAYER_PRESETS:
             preset_actions[menu.addAction(f'Use preset: {name}')] = name
+        menu.addSeparator()
+        act_pick = menu.addAction('Pick player executable…')
         chosen = menu.exec(self.btn_player.mapToGlobal(
             QPoint(0, self.btn_player.height())))
         if chosen is None:
@@ -766,27 +994,61 @@ class PreviewPane(QWidget):
             exe, args = PLAYER_PRESETS[preset_actions[chosen]]
             self.app_settings['external_player'] = exe
             self.app_settings['external_player_args'] = args
+            found = resolve_player_exe(exe)
+            if found:
+                self.app_settings['external_player'] = found
+                self.lbl_info.setText(f'External player set: {found}')
+            else:
+                self.lbl_info.setText(
+                    f'Preset saved, but {exe} was not found on this '
+                    f'system — use "Pick player executable…" to point at '
+                    f'the install.')
+            return
+        if chosen == act_pick:
+            from PyQt6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(
+                self, 'Pick the media player executable', '',
+                'Programs (*.exe);;All files (*)' if os.name == 'nt'
+                else 'All files (*)')
+            if path:
+                self.app_settings['external_player'] = path
+                self.lbl_info.setText(f'External player set: {path}')
             return
         if chosen == act_here:
             self._launch_player()
 
     def _launch_player(self):
-        if not self.video_path or self.cue is None:
-            self.lbl_info.setText('No video bound — cannot open player.')
+        from PyQt6.QtWidgets import QMessageBox
+        if not self.video_path:
+            QMessageBox.information(
+                self, 'External player',
+                'No video is bound to this subtitle — match one in the '
+                'Sources pane first.')
             return
         exe = self.app_settings.get('external_player', '')
         args_tpl = self.app_settings.get('external_player_args',
                                          '"{file}" /start {ms}')
         if not exe:
             self.lbl_info.setText(
-                'No player mapped — pick a preset from the button menu, '
-                'or set the path in Settings.')
+                'No player configured — pick a preset from this menu '
+                'first.')
+            self._open_player_menu()
             return
-        ms = int(self.cue.begin_ms)
-        args = args_tpl.format(file=self.video_path, ms=ms,
-                               sec=f"{ms / 1000.0:.3f}")
+        exe_path = resolve_player_exe(exe)
+        if exe_path is None:
+            QMessageBox.warning(
+                self, 'External player',
+                f'Could not find "{exe}".\n\nUse "Pick player '
+                f'executable…" in the player menu to point at your '
+                f'install.')
+            return
+        ms = int(self.cue.begin_ms) if self.cue else 0
+        cmd = build_player_command(exe_path, args_tpl, self.video_path, ms)
         try:
-            subprocess.Popen([exe] + shlex.split(args,
-                                                 posix=(os.name != 'nt')))
+            subprocess.Popen(cmd)
+            self.lbl_info.setText(
+                f'Opened {os.path.basename(exe_path)} at {_fmt_ms(ms)}.')
         except OSError as e:
-            self.lbl_info.setText(f'Player launch failed: {e}')
+            QMessageBox.warning(self, 'External player',
+                                f'Launch failed:\n{e}\n\n'
+                                f'Command: {" ".join(cmd)}')

@@ -472,6 +472,55 @@ class TestRendering(unittest.TestCase):
         self.assertLess(canvas.content_h, 830)
         self.assertGreater(canvas.content_y, 100)
 
+    def test_padding_moves_regions_without_scaling_text(self):
+        """Safe-area padding = v1 #pad-box: regions move inward, fonts
+        keep their size (only AR letterboxing may scale text)."""
+        cue = next(c for c in self.doc.sorted_cues()
+                   if not self.doc.get_region(c).is_vertical())
+        plain = self.renderer.render_cue(cue)
+
+        ov = OverrideSet()
+        ov.layout.use_padding = True
+        ov.layout.padding_v = 10.0          # 5% inset per edge
+        ov.layout.padding_h = 10.0
+        padded_canvas = compute_canvas((1920, 1080), ov.layout)
+        self.assertEqual(padded_canvas.content_h, 1080.0)   # unshrunk
+        self.assertEqual(padded_canvas.pad_y, 54.0)
+        rp = CueRenderer(self.doc, padded_canvas, ov)
+        padded = rp.render_cue(cue)
+
+        # same glyphs, same size: bitmap dims unchanged
+        self.assertEqual((plain.width, plain.height),
+                         (padded.width, padded.height))
+        # the cue moves inward, away from its anchoring edge
+        if plain.y + plain.height > 540:      # bottom-half cue
+            self.assertLess(padded.y + padded.height,
+                            plain.y + plain.height)
+        else:                                 # top-half cue
+            self.assertGreater(padded.y, plain.y)
+
+    def test_region_overlay_boxes(self):
+        try:
+            from ttml2pgs.ui.widgets.preview import compute_region_boxes
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        for name in ('netflix_ja.ttml', 'styled.vtt'):
+            doc = load_subtitle(sample(name))
+            canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+            r = CueRenderer(doc, canvas, OverrideSet())
+            boxes = compute_region_boxes(doc, r)
+            self.assertEqual(len(boxes), len(doc.regions))
+            colors = set()
+            for rid, hexc, x, y, w, h, corner in boxes:
+                self.assertGreater(w, 4, f'{name}:{rid} collapsed (w)')
+                self.assertGreater(h, 4, f'{name}:{rid} collapsed (h)')
+                self.assertTrue(0 <= x and x + w <= 1921 and
+                                0 <= y and y + h <= 1081,
+                                f'{name}:{rid} outside canvas')
+                colors.add(hexc)
+            self.assertEqual(len(colors), len(boxes),
+                             'region colors must be distinct')
+
 
 class TestPGS(unittest.TestCase):
     def _mkrender(self, uid, x, y, w, h, color=(255, 255, 255, 255)):
@@ -778,6 +827,65 @@ class TestPipelineAndQueue(unittest.TestCase):
             # started/unstarted survives the round-trip
             self.assertTrue(q2.groups[0].render_jobs[0].started)
             self.assertFalse(q2.groups[1].render_jobs[0].started)
+
+    def test_rename_style_cascades(self):
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        # find a style actually referenced by a cue
+        used = next(sid for c in doc.cues for sid in c.style_refs)
+        cue = next(c for c in doc.cues if used in c.style_refs)
+        region = doc.get_region(cue)
+        before = doc.resolve_style([(cue.style_refs, cue.inline_style)],
+                                   region)
+        self.assertTrue(doc.rename_style(used, 'renamed_style'))
+        self.assertNotIn(used, doc.styles)
+        self.assertIn('renamed_style', doc.styles)
+        self.assertIn('renamed_style', cue.style_refs)
+        self.assertNotIn(used, cue.style_refs)
+        after = doc.resolve_style([(cue.style_refs, cue.inline_style)],
+                                  region)
+        self.assertEqual(before.color, after.color)
+        self.assertEqual(before.font_size, after.font_size)
+        # collision refused
+        self.assertFalse(doc.rename_style('renamed_style',
+                                          list(doc.styles.keys())[0]))
+
+    def test_rename_region_cascades(self):
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        rid = next(c.region_id for c in doc.cues if c.region_id)
+        n_refs = sum(1 for c in doc.cues if c.region_id == rid)
+        self.assertTrue(doc.rename_region(rid, 'renamed_region'))
+        self.assertNotIn(rid, doc.regions)
+        self.assertEqual(
+            sum(1 for c in doc.cues if c.region_id == 'renamed_region'),
+            n_refs)
+
+    def test_new_defaults(self):
+        from ttml2pgs.core.overrides import StyleOverrides
+        so = StyleOverrides()
+        self.assertEqual(so.weight_boost, 3.0)
+        self.assertTrue(so.auto_color)
+        # auto-color engages by default: SDR videos get the SDR preset
+        st = so.to_style(is_hdr=False)
+        self.assertEqual(st.color, (229, 229, 229, 255))
+        st = so.to_style(is_hdr=True)
+        self.assertEqual(st.color, (161, 161, 161, 255))
+
+    def test_player_command_builder(self):
+        try:
+            from ttml2pgs.ui.widgets.preview import build_player_command
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        cmd = build_player_command(
+            r'C:\Program Files\MPC-BE\mpc-be64.exe',
+            '"{file}" /start {ms}',
+            r'D:\My Videos\Episode 01.mkv', 61500)
+        # path with spaces stays ONE argv entry, quotes stripped
+        self.assertEqual(cmd, [r'C:\Program Files\MPC-BE\mpc-be64.exe',
+                               r'D:\My Videos\Episode 01.mkv',
+                               '/start', '61500'])
+        cmd = build_player_command('vlc', '--start-time={sec} "{file}"',
+                                   '/tmp/a b.mkv', 61500)
+        self.assertEqual(cmd, ['vlc', '--start-time=61.500', '/tmp/a b.mkv'])
 
     def test_ruby_preview_text_has_parens(self):
         try:

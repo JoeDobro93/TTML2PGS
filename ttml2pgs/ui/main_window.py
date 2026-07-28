@@ -197,6 +197,7 @@ class MainWindow(QMainWindow):
         if sess:
             sess.dirty = True
         self.cue_pane.refresh()
+        self.cue_pane.refresh_regions()
         self.preview_pane.schedule_render()
 
     def _overrides_edited(self):

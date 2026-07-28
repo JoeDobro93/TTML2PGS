@@ -46,10 +46,10 @@ class StyleOverrides:
     #: global alpha multiplier (1.0 = opaque). Applied on top of styles.
     opacity_mult: float = 1.0
 
-    #: stroke weight boost: multiplies the default stem darkening that
-    #: matches Chrome's heavier rasterization (0 = off, 1 = match v1,
-    #: 2-3 = progressively bolder without switching to a bold face).
-    weight_boost: float = 1.0
+    #: stroke weight boost: multiplies the base stem darkening (Chrome-
+    #: style heavier rasterization). 0 = off; 3 = the default calibrated
+    #: against v1's look; higher keeps thickening without going bold.
+    weight_boost: float = 3.0
 
     override_line_height: bool = False
     line_height: Dim = field(default_factory=lambda: Dim(1.25, ''))
@@ -57,7 +57,9 @@ class StyleOverrides:
     #: Auto-color: pick text color/alpha from the *target video's* dynamic
     #: range, so batches mixing HDR and SDR episodes each get suitable
     #: levels (pure white is blinding in HDR; HDR grey is dim in SDR).
-    auto_color: bool = False
+    #: On by default — v1 shipped with it enabled and it's the whole point
+    #: of per-video color handling.
+    auto_color: bool = True
     auto_sdr_color: RGBA = (229, 229, 229, 255)     # SDR White
     auto_sdr_alpha: float = 0.90
     auto_hdr_color: RGBA = (161, 161, 161, 255)     # HDR Grey

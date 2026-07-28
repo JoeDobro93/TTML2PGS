@@ -145,11 +145,73 @@ class DimEdit(QWidget):
 # per-language override editor
 # --------------------------------------------------------------------------- #
 
+#: v1's text color presets: name -> (RGBA, alpha)
+COLOR_PRESETS = [
+    ('SDR White', (229, 229, 229, 255), 0.90),
+    ('SDR Yellow', (255, 238, 140, 255), 1.00),
+    ('HDR Grey', (161, 161, 161, 255), 0.90),
+    ('HDR Grey (OLED safe)', (128, 128, 128, 255), 0.90),
+]
+
+
 class OverrideEditor(QWidget):
     """Per-language overrides, grouped into collapsible sections that all
     share the pane's outer scrollbar (no nested scrolling)."""
 
     changed = pyqtSignal()
+
+    def _preset_row(self, color, alpha, fallback_name):
+        """Preset combo + color button + alpha spin, kept in sync: picking
+        a preset fills color/alpha; manual edits flip the combo to Custom."""
+        row = QHBoxLayout()
+        cmb = QComboBox()
+        for name, _c, _a in COLOR_PRESETS:
+            cmb.addItem(name)
+        cmb.addItem('Custom')
+        btn = ColorButton(color)
+        spin = QDoubleSpinBox()
+        spin.setRange(0, 1)
+        spin.setSingleStep(0.05)
+        spin.setValue(alpha)
+        spin.setToolTip('Text alpha (opacity)')
+
+        def current_name():
+            for name, c, a in COLOR_PRESETS:
+                if tuple(btn.color()) == tuple(c) and \
+                        abs(spin.value() - a) < 0.001:
+                    return name
+            return 'Custom'
+
+        cmb.setCurrentText(current_name())
+
+        def preset_picked(name):
+            for pname, c, a in COLOR_PRESETS:
+                if pname == name:
+                    btn.blockSignals(True)
+                    btn.set_color(c)
+                    btn.blockSignals(False)
+                    spin.blockSignals(True)
+                    spin.setValue(a)
+                    spin.blockSignals(False)
+                    self._commit()
+                    return
+
+        def manual_change(*_):
+            cmb.blockSignals(True)
+            cmb.setCurrentText(current_name())
+            cmb.blockSignals(False)
+
+        cmb.currentTextChanged.connect(preset_picked)
+        btn.changed.connect(manual_change)
+        spin.valueChanged.connect(manual_change)
+
+        row.addWidget(cmb, 1)
+        row.addWidget(btn)
+        row.addWidget(QLabel('α:'))
+        row.addWidget(spin)
+        w = QWidget()
+        w.setLayout(row)
+        return w, cmb, btn, spin
 
     def __init__(self, so: StyleOverrides):
         super().__init__()
@@ -176,20 +238,17 @@ class OverrideEditor(QWidget):
         self.ed_family.setPlaceholderText('e.g. Noto Sans CJK JP, sans-serif')
         form.addRow(self.chk_family, self.ed_family)
         self.spin_boost = QDoubleSpinBox()
-        self.spin_boost.setRange(0.0, 3.0)
-        self.spin_boost.setSingleStep(0.25)
+        self.spin_boost.setRange(0.0, 10.0)
+        self.spin_boost.setSingleStep(0.5)
         self.spin_boost.setValue(so.weight_boost)
         self.spin_boost.setToolTip(
-            'Stem darkening: thickens every glyph slightly, like '
-            'Chrome\'s heavier text rendering. 1.0 matches the v1 look, '
-            '0 disables, higher = bolder without switching fonts.')
+            'Stem darkening: thickens every glyph without switching to a '
+            'bold face. 3 is the default (calibrated against the v1 '
+            'look); 0 disables; go higher for even heavier text.')
         form.addRow('Stroke weight boost:', self.spin_boost)
 
         # ---- Color ---------------------------------------------------- #
         form = section('Color')
-        self.chk_color = QCheckBox('Override color')
-        self.btn_color = ColorButton(so.color)
-        form.addRow(self.chk_color, self.btn_color)
         self.chk_auto = QCheckBox('Auto color by video (SDR/HDR)')
         self.chk_auto.setToolTip(
             'Pick text color/alpha from each target video\'s dynamic '
@@ -197,30 +256,20 @@ class OverrideEditor(QWidget):
             'SDR. Detected per video (metadata + Dolby Vision scan). '
             'Wins over "Override color" when enabled.')
         form.addRow(self.chk_auto)
-        auto_row = QHBoxLayout()
-        auto_row.addWidget(QLabel('SDR:'))
-        self.btn_auto_sdr = ColorButton(so.auto_sdr_color)
-        self.spin_auto_sdr = QDoubleSpinBox()
-        self.spin_auto_sdr.setRange(0, 1)
-        self.spin_auto_sdr.setSingleStep(0.05)
-        self.spin_auto_sdr.setValue(so.auto_sdr_alpha)
-        self.spin_auto_sdr.setToolTip('SDR text alpha')
-        auto_row.addWidget(self.btn_auto_sdr)
-        auto_row.addWidget(self.spin_auto_sdr)
-        auto_row.addSpacing(12)
-        auto_row.addWidget(QLabel('HDR:'))
-        self.btn_auto_hdr = ColorButton(so.auto_hdr_color)
-        self.spin_auto_hdr = QDoubleSpinBox()
-        self.spin_auto_hdr.setRange(0, 1)
-        self.spin_auto_hdr.setSingleStep(0.05)
-        self.spin_auto_hdr.setValue(so.auto_hdr_alpha)
-        self.spin_auto_hdr.setToolTip('HDR text alpha')
-        auto_row.addWidget(self.btn_auto_hdr)
-        auto_row.addWidget(self.spin_auto_hdr)
-        auto_row.addStretch()
-        w_auto = QWidget()
-        w_auto.setLayout(auto_row)
-        form.addRow('   ', w_auto)
+        (w_sdr, self.cmb_auto_sdr, self.btn_auto_sdr,
+         self.spin_auto_sdr) = self._preset_row(
+            so.auto_sdr_color, so.auto_sdr_alpha, 'SDR White')
+        form.addRow('   SDR videos:', w_sdr)
+        (w_hdr, self.cmb_auto_hdr, self.btn_auto_hdr,
+         self.spin_auto_hdr) = self._preset_row(
+            so.auto_hdr_color, so.auto_hdr_alpha, 'HDR Grey')
+        form.addRow('   HDR videos:', w_hdr)
+        self.chk_color = QCheckBox('Override color (fixed)')
+        self.chk_color.setToolTip(
+            'Force one fixed color regardless of the video\'s dynamic '
+            'range. Auto color wins when both are enabled.')
+        self.btn_color = ColorButton(so.color)
+        form.addRow(self.chk_color, self.btn_color)
 
         # ---- Outline & shadow ----------------------------------------- #
         form = section('Outline && shadow')
@@ -825,8 +874,10 @@ class SettingsPane(QWidget):
         ll.addWidget(self.style_list)
         rowb = QHBoxLayout()
         b_add = QPushButton('Add')
+        b_ren = QPushButton('Rename')
         b_del = QPushButton('Delete')
         rowb.addWidget(b_add)
+        rowb.addWidget(b_ren)
         rowb.addWidget(b_del)
         ll.addLayout(rowb)
         st_tab.addWidget(left)
@@ -838,6 +889,7 @@ class SettingsPane(QWidget):
         st_tab.setSizes([160, 420])
         self.tabs.addTab(st_tab, 'Styles')
         b_add.clicked.connect(self._add_style)
+        b_ren.clicked.connect(self._rename_style)
         b_del.clicked.connect(self._del_style)
         self.style_list.currentTextChanged.connect(self._style_selected)
         self.style_editor.changed.connect(self.document_changed.emit)
@@ -851,8 +903,10 @@ class SettingsPane(QWidget):
         rl.addWidget(self.region_list)
         rowrb = QHBoxLayout()
         rb_add = QPushButton('Add')
+        rb_ren = QPushButton('Rename')
         rb_del = QPushButton('Delete')
         rowrb.addWidget(rb_add)
+        rowrb.addWidget(rb_ren)
         rowrb.addWidget(rb_del)
         rl.addLayout(rowrb)
         rg_tab.addWidget(leftr)
@@ -864,6 +918,7 @@ class SettingsPane(QWidget):
         rg_tab.setSizes([160, 420])
         self.tabs.addTab(rg_tab, 'Regions')
         rb_add.clicked.connect(self._add_region)
+        rb_ren.clicked.connect(self._rename_region)
         rb_del.clicked.connect(self._del_region)
         self.region_list.currentTextChanged.connect(self._region_selected)
         self.region_editor.changed.connect(self.document_changed.emit)
@@ -984,16 +1039,62 @@ class SettingsPane(QWidget):
         self.style_list.takeItem(self.style_list.row(item))
         self.document_changed.emit()
 
+    def _rename_style(self):
+        if not self.doc:
+            return
+        item = self.style_list.currentItem()
+        if not item:
+            return
+        old = item.text()
+        new, ok = QInputDialog.getText(self, 'Rename style', 'New id:',
+                                       text=old)
+        new = (new or '').strip()
+        if not ok or not new or new == old:
+            return
+        if not self.doc.rename_style(old, new):
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Rename style',
+                                f"A style named '{new}' already exists.")
+            return
+        item.setText(new)
+        self.document_changed.emit()
+
     def _add_region(self):
         if not self.doc:
             return
         name, ok = QInputDialog.getText(self, 'New region', 'Region id:')
         if not ok or not name.strip():
             return
-        region = Region(id=name.strip())
+        # sensible default: bottom-centered caption box in the safe area
+        region = Region(id=name.strip(),
+                        x=Dim(50, '%'), x_edge='center',
+                        y=Dim(8, '%'), y_edge='bottom',
+                        width=Dim(80, '%'), height=Dim(20, '%'))
+        region.style.display_align = 'after'
+        region.style.text_align = 'center'
         rid = self.doc.ensure_region(region)
         self.region_list.addItem(rid)
         self.region_list.setCurrentRow(self.region_list.count() - 1)
+        self.document_changed.emit()
+
+    def _rename_region(self):
+        if not self.doc:
+            return
+        item = self.region_list.currentItem()
+        if not item:
+            return
+        old = item.text()
+        new, ok = QInputDialog.getText(self, 'Rename region', 'New id:',
+                                       text=old)
+        new = (new or '').strip()
+        if not ok or not new or new == old:
+            return
+        if not self.doc.rename_region(old, new):
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, 'Rename region',
+                                f"A region named '{new}' already exists.")
+            return
+        item.setText(new)
         self.document_changed.emit()
 
     def _del_region(self):

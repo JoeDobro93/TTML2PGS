@@ -92,7 +92,8 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   *Medium* preferred (Chromium's Windows default; plain Regular is
   wire-thin), JIS2004 glyph forms are requested, and a light **stem
   darkening** reproduces Chrome's heavier rasterization — tunable per
-  language via "Stroke weight boost" (0 = off, 1 = v1 look).
+  language via "Stroke weight boost" (0 = off; default 3, calibrated
+  against v1; up to 10 for heavier text without going bold).
 
 ### PGS output
 * Native `.sup` writer, **any canvas size** (odd sizes included), BT.709
@@ -140,18 +141,24 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   feeds the .sup. Selecting a cue seeks to its first frame, paused.
   Falls back automatically to stills mode (matte AR guides + ffmpeg
   frame extraction with HDR tone-map) when the platform lacks a codec.
-  Pop-out window locked 1:1 to the output pixel size (opening it pauses
-  the embedded player); "open in external player at this cue" with
-  MPC-BE / MPC-HC / VLC / mpv presets.
+  **Show regions** outlines every region with its name in distinct
+  stable colors (stills and player mode). Pop-out window locked 1:1 to
+  the output pixel size — works from player mode too (pauses playback,
+  shows the extracted frame behind the cue). "Open in player" hands the
+  bound video to your desktop player (MPC-BE / MPC-HC / VLC / mpv
+  presets, PATH + install-folder detection, or pick the exe) seeked to
+  the selected cue for real-playback sync checking.
 * **Settings pane** — **per-language global override tabs** (Japanese can
   run 5.2vh while English runs 4.5vh in the same batch) including
-  **auto-color**: per *target video*, HDR episodes get the HDR
-  color/alpha and SDR episodes the SDR one — detected automatically for
-  every queued video (metadata + Dolby Vision binary scan), so series
-  batches need no per-episode fiddling. Plus layout/canvas policy
-  (video dims, force 16:9, content-AR override, safe-area padding),
-  post-processing toggles, and live **Styles / Regions / Initial**
-  editors for the active document.
+  **auto-color** (on by default): per *target video*, HDR episodes get
+  the HDR color/alpha and SDR episodes the SDR one — detected
+  automatically for every queued video (metadata + Dolby Vision binary
+  scan), with v1's preset palette (SDR White / SDR Yellow / HDR Grey /
+  OLED-safe) selectable per row. Plus layout/canvas policy (video dims,
+  force 16:9, content-AR override, safe-area padding — padding insets
+  region positions only and **never scales text**), post-processing
+  toggles, and live **Styles / Regions / Initial** editors with
+  add/rename/delete (renames cascade through every cue reference).
 * **Save/Load** native `.t2p` projects (lossless document + overrides +
   bindings); export TTML / WebVTT / SRT (lossy where the target format
   can't express a feature).

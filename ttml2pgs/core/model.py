@@ -421,6 +421,47 @@ class SubtitleDocument:
             n += 1
         return sid
 
+    def rename_style(self, old: str, new: str) -> bool:
+        """Rename a named style, updating every reference to it (style
+        chains, regions, cues and their span trees)."""
+        if old not in self.styles or not new or new in self.styles:
+            return False
+        st = self.styles.pop(old)
+        st.id = new
+        self.styles[new] = st
+
+        def fix(refs: List[str]) -> List[str]:
+            return [new if r == old else r for r in refs]
+
+        for s in self.styles.values():
+            s.parent_ids = fix(s.parent_ids)
+        for r in self.regions.values():
+            r.style_refs = fix(r.style_refs)
+            r.style.parent_ids = fix(r.style.parent_ids)
+        self.initial.parent_ids = fix(self.initial.parent_ids)
+
+        def walk(node: SpanNode):
+            node.style_refs = fix(node.style_refs)
+            for ch in node.children:
+                walk(ch)
+
+        for cue in self.cues:
+            cue.style_refs = fix(cue.style_refs)
+            walk(cue.root)
+        return True
+
+    def rename_region(self, old: str, new: str) -> bool:
+        """Rename a region, updating every cue that references it."""
+        if old not in self.regions or not new or new in self.regions:
+            return False
+        region = self.regions.pop(old)
+        region.id = new
+        self.regions[new] = region
+        for cue in self.cues:
+            if cue.region_id == old:
+                cue.region_id = new
+        return True
+
     def languages_used(self) -> List[str]:
         langs = {c.lang or self.language for c in self.cues}
         return sorted(l for l in langs if l)

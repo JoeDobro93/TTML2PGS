@@ -59,10 +59,23 @@ class CanvasSpec:
     content_y: float
     content_w: float
     content_h: float
+    #: safe-area padding inset per edge. Like v1's #pad-box, it only moves
+    #: the *region anchoring box* inward — fonts and other lengths keep
+    #: resolving against the full content rect, so padding never scales
+    #: text (aspect-ratio letterboxing does, by design).
+    pad_x: float = 0.0
+    pad_y: float = 0.0
 
     @property
     def content(self) -> Tuple[float, float, float, float]:
         return (self.content_x, self.content_y, self.content_w, self.content_h)
+
+    @property
+    def region_box(self) -> Tuple[float, float, float, float]:
+        """Content rect inset by the safe-area padding."""
+        return (self.content_x + self.pad_x, self.content_y + self.pad_y,
+                self.content_w - 2 * self.pad_x,
+                self.content_h - 2 * self.pad_y)
 
 
 def compute_canvas(video_res: Optional[Tuple[int, int]],
@@ -105,14 +118,15 @@ def compute_canvas(video_res: Optional[Tuple[int, int]],
         cwid = ch * ar
         cx, cy = (cw - cwid) / 2.0, 0.0
 
-    # safe-area padding shrinks the content rect without scaling text
+    # safe-area padding: stored separately — it insets only the region
+    # anchoring box (see CanvasSpec.region_box), never the unit-reference
+    # rect, so text size is unaffected.
+    pad_x = pad_y = 0.0
     if opts.use_padding:
-        px = cwid * (opts.padding_h / 100.0) / 2.0
-        py = chei * (opts.padding_v / 100.0) / 2.0
-        cx, cy = cx + px, cy + py
-        cwid, chei = cwid - 2 * px, chei - 2 * py
+        pad_x = cwid * (opts.padding_h / 100.0) / 2.0
+        pad_y = chei * (opts.padding_v / 100.0) / 2.0
 
-    return CanvasSpec(cw, ch, cx, cy, cwid, chei)
+    return CanvasSpec(cw, ch, cx, cy, cwid, chei, pad_x, pad_y)
 
 
 # --------------------------------------------------------------------------- #
@@ -228,9 +242,20 @@ class CueRenderer:
 
     # ------------------------------------------------------------------ #
     def _region_rect(self, region: Region) -> dict:
-        """Resolve region geometry to canvas-absolute pixels."""
-        ctx = self.unit_ctx()
-        cx, cy, cw, ch = self.canvas.content
+        """
+        Resolve region geometry to canvas-absolute pixels.
+
+        Region positions and %-sizes resolve against the *padded* box
+        (v1's #pad-box), while every other unit in the pipeline uses the
+        full content rect — safe-area padding moves regions inward
+        without shrinking text.
+        """
+        cx, cy, cw, ch = self.canvas.region_box
+        ctx = UnitContext(
+            canvas_w=cw, canvas_h=ch,
+            doc_w=self.doc.px_width, doc_h=self.doc.px_height,
+            cell_rows=self.doc.cell_rows, cell_cols=self.doc.cell_cols,
+            font_size_px=48.0, parent_font_px=48.0)
 
         w = ctx.resolve(region.width, axis='x') if region.width else None
         h = ctx.resolve(region.height, axis='y') if region.height else None

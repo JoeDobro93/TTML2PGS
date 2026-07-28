@@ -161,13 +161,23 @@ class AppState:
             ov = data.get('overrides')
             if ov:
                 self.overrides = OverrideSet.from_dict(ov)
+            if int(data.get('version', 1)) < 2:
+                # 2.0.1 defaults changed: stem darkening calibrated to 3.0
+                # and auto-color enabled. Migrate configs saved before the
+                # bump unless the user had set their own values.
+                for so in self.overrides.by_lang.values():
+                    if so.weight_boost == 1.0:
+                        so.weight_boost = 3.0
+                    if not so.override_color:
+                        so.auto_color = True
         except (OSError, ValueError):
             pass
 
     def save_settings(self):
         try:
             with open(self._settings_path, 'w', encoding='utf-8') as f:
-                json.dump({'settings': self.settings,
+                json.dump({'version': 2,
+                           'settings': self.settings,
                            'overrides': self.overrides.to_dict()},
                           f, indent=1)
         except OSError:

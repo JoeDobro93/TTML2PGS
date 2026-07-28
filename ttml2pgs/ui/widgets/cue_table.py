@@ -330,6 +330,22 @@ class CuePane(QWidget):
     def refresh(self):
         self.model.refresh_order()
 
+    def refresh_regions(self):
+        """Rebuild the region filter after regions were added/renamed/
+        removed in the settings pane (the in-table editor reads the doc
+        live, so only this combo needs refreshing)."""
+        current = self.cmb_region.currentText()
+        self.cmb_region.blockSignals(True)
+        self.cmb_region.clear()
+        self.cmb_region.addItem('All regions')
+        if self.doc:
+            self.cmb_region.addItem('(default)')
+            self.cmb_region.addItems(list(self.doc.regions.keys()))
+        idx = self.cmb_region.findText(current)
+        self.cmb_region.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cmb_region.blockSignals(False)
+        self._filters_changed()
+
     def _filters_changed(self):
         self.proxy.set_filters(self.txt_filter.text(),
                                self.cmb_region.currentText())
