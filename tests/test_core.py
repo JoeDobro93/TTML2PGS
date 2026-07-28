@@ -319,6 +319,51 @@ class TestAutoRuby(unittest.TestCase):
         self.assertEqual(self._rubies(doc.cues[0]), [])
 
 
+class TestDedup(unittest.TestCase):
+    """HLS-chunked VTTs duplicate the boundary cue — must be condensed."""
+
+    def _vtt(self, body):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 't.en.vtt')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write("WEBVTT\n\n" + body)
+            return load_subtitle(p)
+
+    def test_identical_overlap_condensed(self):
+        doc = self._vtt(
+            "00:10.000 --> 00:12.000 line:90%\nSame line\n\n"
+            "00:10.000 --> 00:12.000 line:90%\nSame line\n")
+        self.assertEqual(len(doc.cues), 1)
+
+    def test_partial_overlap_merges_to_union(self):
+        doc = self._vtt(
+            "00:10.000 --> 00:12.000\nSame line\n\n"
+            "00:11.500 --> 00:14.000\nSame line\n")
+        self.assertEqual(len(doc.cues), 1)
+        self.assertEqual(doc.cues[0].begin_ms, 10000)
+        self.assertEqual(doc.cues[0].end_ms, 14000)
+
+    def test_adjacent_identical_not_merged(self):
+        doc = self._vtt(
+            "00:10.000 --> 00:12.000\nSame line\n\n"
+            "00:12.000 --> 00:14.000\nSame line\n")
+        self.assertEqual(len(doc.cues), 2)
+
+    def test_different_text_or_position_kept(self):
+        doc = self._vtt(
+            "00:10.000 --> 00:12.000 line:90%\nLine A\n\n"
+            "00:10.000 --> 00:12.000 line:10%\nLine A\n\n"
+            "00:10.000 --> 00:12.000 line:90%\nLine B\n")
+        self.assertEqual(len(doc.cues), 3)
+
+    def test_chain_of_chunk_duplicates(self):
+        doc = self._vtt(
+            "00:10.000 --> 00:12.000\nSame\n\n"
+            "00:10.000 --> 00:12.000\nSame\n\n"
+            "00:10.000 --> 00:12.000\nSame\n")
+        self.assertEqual(len(doc.cues), 1)
+
+
 class TestAutoColor(unittest.TestCase):
     def test_auto_color_picks_by_dynamic_range(self):
         so = StyleOverrides()

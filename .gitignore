@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .idea/
 app_settings.json
+compare_out/

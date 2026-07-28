@@ -129,4 +129,53 @@ def load_subtitle(path: str) -> SubtitleDocument:
         # Rebuild flattened 漢字(かんじ) ruby once the language is known.
         from .ruby import apply_auto_ruby
         apply_auto_ruby(doc)
+    n = dedupe_overlapping_duplicates(doc)
+    if n:
+        doc.metadata['deduplicated_cues'] = str(n)
     return doc
+
+
+def dedupe_overlapping_duplicates(doc: SubtitleDocument) -> int:
+    """
+    Condense identical cues whose time ranges overlap.
+
+    Segmented VTT streams (HLS chunks) repeat the trailing cue of one
+    chunk at the head of the next; when both survive stitching, the cue
+    is rendered twice on screen — invisible when fully opaque, but with
+    alpha the stacked copies double up and look less transparent. Cues
+    with identical content, region and styling whose intervals *overlap*
+    are merged into one cue spanning their union. Identical adjacent
+    (touching, non-overlapping) cues are left alone — that's a
+    legitimate re-display.
+
+    Returns the number of cues removed.
+    """
+    from ..project import cue_to_json
+    import json
+
+    def signature(cue):
+        d = cue_to_json(cue)
+        d.pop('begin', None)
+        d.pop('end', None)
+        d.pop('sid', None)
+        return json.dumps(d, sort_keys=True, ensure_ascii=False)
+
+    by_sig = {}
+    for cue in doc.cues:
+        by_sig.setdefault(signature(cue), []).append(cue)
+
+    removed = set()
+    for group in by_sig.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda c: (c.begin_ms, c.end_ms))
+        keeper = group[0]
+        for cue in group[1:]:
+            if cue.begin_ms < keeper.end_ms - 0.001:     # strict overlap
+                keeper.end_ms = max(keeper.end_ms, cue.end_ms)
+                removed.add(id(cue))
+            else:
+                keeper = cue
+    if removed:
+        doc.cues = [c for c in doc.cues if id(c) not in removed]
+    return len(removed)
