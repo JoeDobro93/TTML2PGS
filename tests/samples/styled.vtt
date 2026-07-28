@@ -1,0 +1,53 @@
+WEBVTT - with styles and regions
+
+REGION
+id:bottomband
+width:80%
+lines:3
+regionanchor:50%,100%
+viewportanchor:50%,90%
+
+STYLE
+::cue {
+  color: #ffffff;
+  text-shadow: 2px 2px 3px rgba(0,0,0,0.8);
+}
+
+STYLE
+::cue(.yellow) {
+  color: yellow;
+}
+::cue(.big) {
+  font-size: 6vh;
+}
+::cue(i) {
+  color: #cccccc;
+}
+
+NOTE this is a comment block
+that spans lines
+
+1
+00:00:01.000 --> 00:00:04.000 region:bottomband
+Hello <c.yellow>colored</c> world
+
+2
+00:00:03.500 --> 00:00:06.000 line:10% align:center
+Overlapping upper cue with <i>italics</i>
+
+3
+00:00:07.000 --> 00:00:09.000 vertical:rl line:90% position:20%,center
+縦書きテキスト
+
+4
+00:00:10.000 --> 00:00:12.000 position:20%,line-left align:left size:40%
+Left-anchored
+narrow cue
+
+5
+00:00:13.000 --> 00:00:15.000
+<ruby>漢字<rt>かんじ</rt></ruby>のルビ &amp; entities
+
+6
+00:00:16.000 --> 00:00:18.000
+<v Speaker One>Voiced line</v>

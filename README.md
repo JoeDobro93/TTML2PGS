@@ -1,59 +1,160 @@
-# What is this for?
-This is a Python based program to convert TTML and WebVTT subtitles to image based PGS .sup subtitles and remux them into target video files.
+# TTML2PGS 2
 
-Significantly slower than SubtitleEdit .sup exports as it uses CSS/HTML formatting which allows ruby text, vertical subtitles, and proper scaling that SubtitleEdit's quicker rendering cannot handle. For English subtitles this is usually not a big deal, but for Japanese subtitles or other languages that may use these features more, this will allow more accurate subtitles to be generated.
+Convert TTML / WebVTT / SRT subtitles to image-based PGS (`.sup`) tracks and
+remux them into your videos — with browser-quality CJK typography (ruby,
+vertical text, proper Japanese-vs-Chinese glyphs) at native-code speed.
 
-The PGS subtitles will make the subtitles appear consistently regarless of the player and ensure no issues with CJK unified characters. Ideal for files in Plex on an Nvidia Sheild or other device that suports PGS without transcoding.
+**Version 2 is a ground-up rewrite.** The v1 pipeline rendered every cue as
+HTML in headless Chrome and screenshotted it; v2 rasterizes glyphs directly
+with HarfBuzz + FreeType + NumPy. Same visual results (paint-order outlines,
+soft shadows, justified ruby), several times faster, no browser dependency,
+and far less RAM. The legacy app is still in `core/`, `ui/`, `main.py` for
+reference; the new app lives entirely in `ttml2pgs/`.
 
-# Basic Overview
-## Files panel (bottom left)
-Adding a subtitle file will automatically try to match a video file that shares the same name as the subtitle.
+## Running
 
-If a match is found, ffmpeg will populate the program with video metadata.
-Similar in Add Folder except it will add all subtitles and matching videos in a folder.
+```bash
+pip install -r requirements.txt
 
-Offset (ms) can be manually added and applied on render.
+python -m ttml2pgs                      # GUI
+python -m ttml2pgs render sub.ja.ttml --video movie.mkv --mux
+python -m ttml2pgs convert sub.vtt -o sub.srt
+python -m ttml2pgs inspect sub.ttml     # dump styles/regions/cues
+python -m ttml2pgs preview sub.ttml -n 5 -o out/   # cue PNGs
+```
 
-Run (Current) will only render the selected subtitle file while Run (Batch) starts rendering everything loaded in. More should be able to be added to the cue while a batch render is running, but I haven't tested this much so I recommend waiting for a batch to finish completely before clearing files and running another batch to avoid potential crashes or bugs.
+`ffmpeg`/`ffprobe` (probing, preview frames) and `mkvmerge` (remuxing)
+should be on PATH.
 
-"Render Only Selected Cues" must be selected first if you uncheck any cues and want to only render the selected cues, otherwise all cues will be rendered regardless of selection.
+## What v2 does
 
-## Cues Panel (top left)
-Shows all the cues of the currently selected subtitle file loaded in.
+### Parsing — to one editable model
+* **TTML1 / TTML2 / IMSC** per the 2018 W3C recommendations: referential
+  styling chains, `<initial>`, region styling (including nested `<style>`),
+  `tts:origin/extent/position`, SMPTE/media/offset/tick time expressions
+  with `frameRate(Multiplier)`/`tickRate`/`subFrameRate`, cellResolution
+  units, ruby (all roles), `textCombine` (tate-chū-yoko), `shear`,
+  `textEmphasis` (bōten), `textOutline`, `textShadow`, `writingMode`,
+  `multiRowAlign`, xml:space handling, the Netflix `Smpte24TimingAdjusted`
+  quirk.
+* **WebVTT**: `REGION` blocks, `STYLE ::cue` selectors (classes, tags,
+  voices, lang), all cue settings (`vertical/line/position/size/align`
+  with alignment suffixes), payload tags (`c i b u v lang ruby rt`,
+  timestamps), and **region derivation** — cues sharing positional
+  signatures collapse into shared regions (one region for a normal file,
+  a second for vertical cues, etc.).
+* **SRT**: tags, `<font color>`, `{\anX}` anchors → derived regions.
+* Language detection from filename/metadata; flattened `漢字(かんじ)`
+  patterns in Japanese VTT/SRT are rebuilt into real ruby.
 
-Clicking on any row will send a preview to the preview panel.
+Styles are kept as **references + inline styles** and resolved through the
+full cascade at render time — so editing a named style updates every cue
+that uses it, live (the v1 "baked at parse" flaw is gone).
 
-Very basical filtering feature as well as a "region" filter to help make sure that all regions are appearing as intended and can be useful for checking targeted adjustments to positioning.
+### Rendering — direct to pixels
+* Per-run font selection with **language-aware CJK fallback**: a `ja`
+  document will never borrow unified-Han glyphs from a Chinese font when a
+  Japanese font exists (and vice versa); localized family names
+  (`游ゴシック` …) match; bold/italic pick real faces with synthetic
+  fallback.
+* HarfBuzz shaping (kerning, ligatures, `vert` features), line breaking
+  with Japanese kinsoku rules, `multiRowAlign`, letter spacing.
+* **Ruby**: over/under, 1-2-1 justification when the annotation is
+  narrower than its base, centered with widening when longer; annotation
+  size follows the author's explicit size or a 50 % default.
+* **Vertical text** (`tbrl`/`tblr`): upright kana/kanji, rotated Latin
+  runs, full-width digit conversion, tate-chū-yoko groups, ruby on the
+  correct side, per-column ruby reserve.
+* Effects: stroked outlines (round joins, painted under all fills),
+  multi-shadow with blur/alpha, background boxes, shear/italics (slanting
+  along the correct axis in vertical), emphasis dots/circles/sesame,
+  underline/strike.
+* **Everything scales.** All lengths live as units (`%`, `vh/vw`, `c`,
+  `em`, authored `px` rescaled from the document's declared pixel space),
+  resolved against the output canvas — a 3px outline authored for 1080p
+  renders as 6px on a 2160p canvas.
 
-## Preview Panel (top right)
-Shows the current cue as it will be rendered on a plain background color. May try to add a video player in the future, but for now this is a quick way to check that subtitle formatting is working as intended.
+### PGS output
+* Native `.sup` writer, **any canvas size** (odd sizes included), BT.709
+  palettes for HD, lossless quantization when ≤255 colors with graceful
+  posterize + nearest-remap fallback, numpy RLE.
+* **Jitter-free overlaps**: each display set carries up to two composition
+  objects/windows, so a cue that continues across an overlap boundary
+  keeps a byte-identical bitmap at an identical position. Composites (>2
+  overlapping boxes) are cached per cue-set so they're stable too.
+* Frame-rate conform (23.976↔24↔25, PAL speedup, 30→29.97…) with
+  automatic suggestion when the subtitle's declared fps mismatches the
+  probed video fps — telecine pairs (29.97i from 23.976) correctly map to
+  "no change". Manual conform lives in Cue pane → Time tools.
 
-Aspect ratio changes here do not affect the subtitles themselves, but create pillar/letter boxing to show where the subtitles will appear if the destination is not 16:9. All .sup files are rendered as 1920x1080 images (Blu-Ray standard), but will still work as intended in most players even if the video itself is a different resolution/aspect ratio. I will likely update the program to allow custom resolution .sup files that don't conform the the blu-0ray standard.
+### The queue (rebuilt)
+* Jobs are grouped **per target video**; a group's mux starts as soon as
+  *its* renders finish — a crash on episode 12 no longer costs you the
+  eleven finished episodes.
+* Add a second subtitle for an already-queued video (even mid-render) and
+  the group's mux waits for it.
+* Queue **external `.sup` files** for mux-only.
+* Pause / resume / cancel / retry / reorder at queue, group and job
+  level; pausing checkpoints between cues and resumes without redoing
+  finished cues.
+* Queue state persists to disk; after a crash, finished `.sup`s are
+  detected and only missing work re-runs.
 
-## Settings Panel (bottom right)
-### Global Overrides
-These override any checked attribute for the subtitle file that may be present in the source subtitle file and apply to all subtitles being rendered in the batch.
+### The UI (rebuilt)
+* **Sources pane** — open many subtitles, auto-matched videos (stem
+  matching, language/flag tokens ignored), probed resolution/fps/HDR,
+  conform indicator, per-file offset and output name. Per-session edits
+  persist until you close the app; restore-on-launch included.
+* **Cue pane** — filter by text/region, edit times/region/text inline,
+  add/duplicate/delete cues, enable checkboxes, and Time tools (shift
+  all/selected/after; manual fps conform with explained presets).
+* **Preview** — shows the selected cue *plus any overlapping cues* exactly
+  as they'll appear; matte guides for other aspect ratios; video-frame
+  backgrounds (with HDR tone-map toggle); a pop-out window locked 1:1 to
+  the output pixel size; "open in external player at this cue" with
+  MPC-BE / MPC-HC / VLC / mpv presets.
+* **Settings pane** — **per-language global override tabs** (Japanese can
+  run 5.2vh while English runs 4.5vh in the same batch), layout/canvas
+  policy (video dims, force 16:9, content-AR override, safe-area
+  padding), post-processing toggles, plus live **Styles / Regions /
+  Initial** editors for the active document.
+* **Save/Load** native `.t2p` projects (lossless document + overrides +
+  bindings); export TTML / WebVTT / SRT (lossy where the target format
+  can't express a feature).
 
-Auto-Color is to help when batching a combination of HDR and SDR files as pure white subtitles may result in blindingly bright subtitles in HDR while grey in SDR may be dim. This also applies an opacity of .9 alpha to HDR files. This is determined by the target video.
+## Architecture
 
-For font size, I recommend using "vh" units (video height) which sets the font size based on the percentage of the video height. Somewhere between 4 and 5 is generally a good value.
+```
+ttml2pgs/
+  cli.py                render/convert/inspect/preview commands
+  core/
+    model.py            document model: styles (referenced), regions, cue span trees
+    units.py, colors.py, timing.py
+    parsers/            ttml.py, vtt.py, srt.py (+ detection)
+    fonts.py            discovery, localized names, CJK-aware fallback
+    shaping.py          HarfBuzz wrapper
+    layout.py           lines, kinsoku, ruby, vertical, TCY, emphasis
+    raster.py           FreeType glyphs, stroker outlines, shadows, compositing
+    renderer.py         canvas/region resolution, cascade → pixels
+    pgs.py              overlap timeline + SUP writer
+    overrides.py        per-language override sets + layout options
+    pipeline.py         doc → .sup orchestration (pause/cancel/resume)
+    jobqueue.py         video-grouped queue engine
+    video.py            ffprobe, HDR detect, matching, remux
+    exporters.py        TTML/VTT/SRT writers
+    project.py          .t2p project format
+  ui/                   PyQt6 app (panes described above)
+tests/
+  test_core.py          35 tests: parsers, layout, PGS bytes, queue, round-trips
+  samples/              TTML (ruby/vertical/emphasis), VTT (regions/styles), SRT
+```
 
-"Force 16:9 Layout" will ignore the aspect ratio of the target video file and render as if it were 16:9. This is useful for any subtitle file that already takes into account alternate aspect ratios and positions the subtitles in a 16:9 window (It's Always Sunny .vtt subtitles in the first 5 seasons sourced from Disney+ are an exapmle of this). You can use the preview to check if this is necessary. If it is not, you may end up with subtiltes going into the black bars which may be distracting.
-
-"Override Content Aspect Ratio" will set a custom aspect ratio to position the subtitles within. This is useful for video files where black bars are part of the video frame itself.
-
-Note that changing the aspect ratio will affect scaling of subtitle font size if "vh" is selected and the aspect ratio results in letterboxing.
-
-For "Remux into Video on Completion" I recommend having MKVToolNix installed. remuxer.py points to "mkvmerge.exe" in this install for this program. Without it, it uses ffmpeg to remux, but I have had some issues with this working as intended.
-
-Uncheck Clean-up Temp Files only if you need to check on how images are rendered intividually if there is a bug. These files are generated in the folder the subtitle/video files are contained in.
-
-### Initials/Styles/Regions (THESE FEATURES ARE STILL INCOMPLETE AND DON'T ENTIRELY WORK AS INTENDED - MOSTLY JUST USEFUL FOR POSITIONING OF REGIONS FOR NOW
-#### Initials
-This mostly doesn't work, but it will at least show the defaults for the selected subtitle file.
-
-#### Styles
-This is also not enitrely working as intended, but allows editing for font styles in the selected subtitle file.
-
-#### Regions
-Useful for adjusting regions in a specific subtitle file. "X" and "Y" adjustments are used to position the region precisely and won't affect font size scaling like aspect ratio changes do. Even when working with the aspect ratio overrides on, this can still be useful if you want a different distance to the edges.
+## Known limitations
+* No bidi/RTL shaping yet (Arabic/Hebrew subtitles).
+* `rubyReserve`, `textOrientation: sideways/upright` overrides, and
+  gradual `line`-number snap positioning use sensible approximations.
+* The preview's "video playback" is frame-accurate stills + external
+  player hand-off, not an embedded player.
+* Rendering is single-process; a typical 550-cue CJK episode renders +
+  encodes in about a minute on a modest CPU (several times the v1 Chrome
+  pipeline; further parallelism is a straightforward future optimization).

@@ -1,0 +1,16 @@
+1
+00:00:01,000 --> 00:00:03,500
+Simple first line
+with a second line
+
+2
+00:00:04,000 --> 00:00:06,000
+<i>Italic text</i> and <b>bold</b>
+
+3
+00:00:07,000 --> 00:00:09,000
+{\an8}Top-centered caption
+
+4
+00:00:10,000 --> 00:00:12,000
+<font color="#00ff00">Green</font> text

@@ -1,0 +1,13 @@
+# TTML2PGS 2 — core rendering
+Pillow>=10.0
+numpy>=1.26
+uharfbuzz>=0.39
+freetype-py>=2.4
+fonttools>=4.47
+
+# GUI
+PyQt6>=6.6
+
+# Runtime tools expected on PATH (not pip):
+#   ffmpeg/ffprobe  – video probing, preview frames, mux fallback
+#   mkvmerge        – preferred remuxer (MKVToolNix)
