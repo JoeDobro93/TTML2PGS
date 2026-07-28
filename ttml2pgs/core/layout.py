@@ -208,6 +208,19 @@ def _is_upright_in_vertical(ch: str) -> bool:
 
 _FW_DIGITS = str.maketrans('0123456789', '０１２３４５６７８９')
 
+#: last-chance substitutions for characters most fonts lack, tried before
+#: falling back to a pan-unicode bitmap font (keeps rare punctuation from
+#: rendering in an ugly fallback face).
+_CHAR_SUBSTITUTIONS = {
+    '⸺': '——',      # two-em dash -> 2x em dash
+    '⸻': '———',
+    '〝': '“', '〞': '”', '〟': '„',
+    '⹀': '＝', '﹘': '－',
+    '¬': '-', '⁇': '??', '⁈': '?!', '⁉': '!?', '‼': '!!',
+    '［': '[', '］': ']', '｟': '（', '｠': '）',
+    '`': "'",
+}
+
 
 # --------------------------------------------------------------------------- #
 # Atoms
@@ -321,16 +334,30 @@ class LayoutEngine:
         seg = ''
         seg_face: Optional[FaceRecord] = None
         for ch in text:
-            face = self.fm.pick_face(style.faces, ch)
+            face = self.fm.face_covering(style.faces, ch)
+            piece = ch
+            if face is None or self.fm.is_low_quality(face):
+                # try a typographic substitution before accepting a
+                # missing glyph or a pan-unicode bitmap fallback
+                sub = _CHAR_SUBSTITUTIONS.get(ch)
+                if sub:
+                    sub_faces = [self.fm.face_covering(style.faces, c)
+                                 for c in sub]
+                    if all(f is not None and not self.fm.is_low_quality(f)
+                           for f in sub_faces):
+                        piece = sub
+                        face = sub_faces[0]
+                if face is None:
+                    face = self.fm.pick_face(style.faces, ch)
             if face is None:
                 continue
             if seg_face is None or face.key() == seg_face.key():
                 seg_face = face
-                seg += ch
+                seg += piece
             else:
                 runs.append(self._shape_seg(seg, seg_face, style,
                                             vertical_upright, rot90, fpx))
-                seg, seg_face = ch, face
+                seg, seg_face = piece, face
         if seg and seg_face is not None:
             runs.append(self._shape_seg(seg, seg_face, style,
                                         vertical_upright, rot90, fpx))

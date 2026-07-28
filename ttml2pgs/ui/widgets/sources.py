@@ -50,6 +50,12 @@ class SourcesPane(QWidget):
         bar.addWidget(b_sup)
         bar.addWidget(b_close)
         bar.addStretch()
+        from PyQt6.QtWidgets import QCheckBox
+        self.chk_selected_only = QCheckBox('Only checked cues')
+        self.chk_selected_only.setToolTip(
+            'Render only cues whose checkbox is ticked in the cue pane '
+            '(applies to the render you queue next).')
+        bar.addWidget(self.chk_selected_only)
         self.b_render = QPushButton('Render selected')
         self.b_render_all = QPushButton('Render ALL')
         self.b_render_all.setStyleSheet('font-weight:bold;')
@@ -90,6 +96,10 @@ class SourcesPane(QWidget):
         self._loading = False
 
     # ------------------------------------------------------------------ #
+    def selected_cues_only(self) -> bool:
+        return self.chk_selected_only.isChecked()
+
+    # ------------------------------------------------------------------ #
     def refresh(self):
         self._loading = True
         st = self.state
@@ -126,8 +136,10 @@ class SourcesPane(QWidget):
             hdr.setForeground(QBrush(QColor('#69d26a')))
         put(COL_SRC_FPS, fps_label(sess.doc.fps) if sess.doc.fps else '?',
             tip='Frame rate declared by the subtitle file')
-        put(COL_TGT_FPS, fps_label(sess.target_fps()),
-            tip='Target (video) frame rate')
+        put(COL_TGT_FPS, fps_label(sess.target_fps()), editable=True,
+            tip='Target frame rate for the .sup (probed from the video). '
+                'Double-click to force a different rate — timestamps are '
+                'conformed src→target at render time.')
         plan = sess.retime_plan()
         c = put(COL_CONFORM, plan.description if plan else '—',
                 tip='Automatic frame-rate conform applied at render time '
@@ -220,6 +232,23 @@ class SourcesPane(QWidget):
             except ValueError:
                 pass
             self.session_changed.emit(row)
+        elif col == COL_TGT_FPS:
+            from fractions import Fraction
+            from ...core.timing import normalize_fps
+            text = item.text().strip()
+            try:
+                if '/' in text:
+                    n, d = text.split('/')
+                    fps = Fraction(int(n), int(d))
+                else:
+                    fps = normalize_fps(float(text))
+                sess.manual_dst_fps = fps
+                sess.use_manual_conform = True
+            except (ValueError, ZeroDivisionError):
+                sess.use_manual_conform = False
+                sess.manual_dst_fps = None
+            self.refresh()
+            self.session_changed.emit(row)
         elif col == COL_LANG:
             lang = item.text().strip()
             if lang:
@@ -242,6 +271,8 @@ class SourcesPane(QWidget):
         a_render = menu.addAction('Render this file')
         a_rematch = menu.addAction('Re-match video from folder')
         a_unbind = menu.addAction('Unbind video')
+        a_offset_all = menu.addAction('Copy offset to all files')
+        a_auto_conform = menu.addAction('Reset target fps to auto')
         act = menu.exec(self.table.viewport().mapToGlobal(pos))
         sess = self.state.sessions[row]
         if act == a_render:
@@ -252,5 +283,16 @@ class SourcesPane(QWidget):
             self.session_changed.emit(row)
         elif act == a_unbind:
             sess.bind_video(None)
+            self.refresh()
+            self.session_changed.emit(row)
+        elif act == a_offset_all:
+            for s in self.state.sessions:
+                s.offset_ms = sess.offset_ms
+            self.refresh()
+            self.session_changed.emit(row)
+        elif act == a_auto_conform:
+            sess.use_manual_conform = False
+            sess.manual_dst_fps = None
+            sess.manual_src_fps = None
             self.refresh()
             self.session_changed.emit(row)

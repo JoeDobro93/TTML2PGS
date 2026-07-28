@@ -188,6 +188,170 @@ class TestParsers(unittest.TestCase):
                             (0, 255, 0, 255) for s in spans))
 
 
+class TestRealWorldQuirks(unittest.TestCase):
+    """Regressions found against real Netflix/Amazon/Disney+ files."""
+
+    def test_position_percent_is_point_semantics(self):
+        # Netflix Django: position="right 10.0rw top 50.0%" must center
+        # vertically ((H - h) * 50%), not offset the top edge by 50%.
+        xml = '''<tt xmlns="http://www.w3.org/ns/ttml"
+            xmlns:tts="http://www.w3.org/ns/ttml#styling">
+          <head><layout>
+            <region xml:id="r" tts:extent="30% 80%"
+                    tts:position="right 10.0rw top 50.0%"
+                    tts:writingMode="tbrl"/>
+          </layout></head>
+          <body><div><p begin="0s" end="1s" region="r">縦</p></div></body>
+        </tt>'''
+        doc = TTMLParser().parse_string(xml)
+        r = doc.regions['r']
+        self.assertEqual(r.y_edge, 'point')
+        self.assertAlmostEqual(r.y.value, 50.0)
+        self.assertEqual(r.x_edge, 'right')
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        rend = CueRenderer(doc, canvas)
+        rect = rend._region_rect(r)
+        x, y = rend._anchor_pos(rect, rect['w'], rect['h'])
+        self.assertAlmostEqual(y, (1080 - 864) / 2, delta=1)   # 108
+        self.assertAlmostEqual(x, 1920 - 192 - 576, delta=1)   # 1152
+
+    def test_smpte24_flag_on_head_metadata(self):
+        xml = '''<tt xmlns="http://www.w3.org/ns/ttml"
+            xmlns:nttm="http://www.netflix.com/ns/ttml#metadata"
+            xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+            ttp:tickRate="10000000">
+          <head><metadata nttm:Smpte24TimingAdjusted="true"/></head>
+          <body><div><p begin="0s" end="1s">x</p></div></body></tt>'''
+        doc = TTMLParser().parse_string(xml)
+        self.assertEqual(doc.fps, Fraction(24000, 1001))
+
+    def test_language_normalization(self):
+        from ttml2pgs.core.parsers import normalize_language
+        self.assertEqual(normalize_language('jp'), 'ja')
+        self.assertEqual(normalize_language('jpn'), 'ja')
+        self.assertEqual(normalize_language('en-US'), 'en')
+        self.assertEqual(normalize_language('zh-TW'), 'zh-Hant')
+
+    def test_ttml2_extension_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 'x.ttml2')
+            with open(p, 'w') as f:
+                f.write('<tt xmlns="http://www.w3.org/ns/ttml"/>')
+            self.assertEqual(detect_format(p), 'ttml')
+
+    def test_char_substitution_fallback(self):
+        # ⸺ (two-em dash) is missing from most fonts; it must substitute
+        # to em dashes instead of falling back to the bitmap font.
+        from ttml2pgs.core.layout import LayoutEngine, TextItem
+        from ttml2pgs.core.fonts import FontManager
+        fm = FontManager.instance()
+        eng = LayoutEngine()
+        from ttml2pgs.core.layout import RunStyle
+        rs = RunStyle(font_px=40,
+                      faces=fm.resolve_stack(['sans-serif'], lang='ja'))
+        result = eng.layout([TextItem('あ⸺い', rs)], measure=None)
+        self.assertGreaterEqual(len(result.glyphs), 4)  # ⸺ became 2 glyphs
+
+
+class TestAutoRuby(unittest.TestCase):
+    def _parse_srt(self, payload):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 't.ja.srt')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write(f"1\n00:00:01,000 --> 00:00:02,000\n{payload}\n")
+            return load_subtitle(p)
+
+    @staticmethod
+    def _rubies(cue):
+        out = []
+
+        def w(n):
+            if n.kind == 'span' and n.inline_style and \
+                    n.inline_style.ruby == 'container':
+                base = ann = ''
+                for c in n.children:
+                    role = c.inline_style.ruby if c.inline_style else ''
+                    if role == 'base':
+                        base = c.plain_text()
+                    elif role == 'text':
+                        ann = c.plain_text()
+                out.append((base, ann))
+            for c in n.children:
+                w(c)
+        w(cue.root)
+        return out
+
+    def test_ascii_parens_make_ruby_space_removed(self):
+        doc = self._parse_srt('これは 東京(とうきょう)です')
+        self.assertEqual(self._rubies(doc.cues[0]), [('東京', 'とうきょう')])
+        # the delimiter space is removed from the render text
+        self.assertNotIn(' ', doc.cues[0].plain_text())
+
+    def test_fullwidth_parens_stay_text(self):
+        doc = self._parse_srt('楽しい（わらい）時間')
+        self.assertEqual(self._rubies(doc.cues[0]), [])
+        self.assertIn('（わらい）', doc.cues[0].plain_text())
+
+    def test_non_kana_annotation_stays_text(self):
+        doc = self._parse_srt('組織(FBI)の捜査')
+        self.assertEqual(self._rubies(doc.cues[0]), [])
+
+    def test_line_start_base(self):
+        doc = self._parse_srt('相談(パーレイ)する')
+        self.assertEqual(self._rubies(doc.cues[0]), [('相談', 'パーレイ')])
+
+    def test_vtt_gets_auto_ruby_too(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 't.ja.vtt')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write("WEBVTT\n\n00:01.000 --> 00:02.000\n"
+                        "痙攣(けいれん)あり\n")
+            doc = load_subtitle(p)
+        self.assertEqual(self._rubies(doc.cues[0]), [('痙攣', 'けいれん')])
+
+    def test_non_japanese_untouched(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 't.en.srt')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write("1\n00:00:01,000 --> 00:00:02,000\n"
+                        "hello (world)\n")
+            doc = load_subtitle(p)
+        self.assertEqual(self._rubies(doc.cues[0]), [])
+
+
+class TestAutoColor(unittest.TestCase):
+    def test_auto_color_picks_by_dynamic_range(self):
+        so = StyleOverrides()
+        so.auto_color = True
+        so.auto_sdr_color = (229, 229, 229, 255)
+        so.auto_hdr_color = (128, 128, 128, 255)
+        so.auto_sdr_alpha = 1.0
+        so.auto_hdr_alpha = 0.9
+        sdr = so.to_style(is_hdr=False)
+        hdr = so.to_style(is_hdr=True)
+        self.assertEqual(sdr.color, (229, 229, 229, 255))
+        self.assertEqual(hdr.color, (128, 128, 128, 255))
+        self.assertAlmostEqual(hdr.opacity_mult, 0.9)
+        # auto wins over manual color override
+        so.override_color = True
+        so.color = (255, 0, 0, 255)
+        self.assertEqual(so.to_style(is_hdr=True).color,
+                         (128, 128, 128, 255))
+
+    def test_auto_color_changes_render(self):
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        ov = OverrideSet()
+        so = ov.by_lang['']
+        so.auto_color = True
+        so.auto_hdr_color = (120, 120, 120, 255)
+        sdr = CueRenderer(doc, canvas, ov, is_hdr=False)
+        hdr = CueRenderer(doc, canvas, ov, is_hdr=True)
+        a = sdr.render_cue(doc.cues[0])
+        b = hdr.render_cue(doc.cues[0])
+        self.assertFalse(np.array_equal(a.bitmap, b.bitmap))
+
+
 class TestStyleResolution(unittest.TestCase):
     def test_nested_innermost_wins(self):
         doc = SubtitleDocument()

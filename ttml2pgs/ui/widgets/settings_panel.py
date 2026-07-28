@@ -133,6 +133,34 @@ class OverrideEditor(QWidget):
         self.chk_color = QCheckBox('Override color')
         self.btn_color = ColorButton(so.color)
         form.addRow(self.chk_color, self.btn_color)
+        # auto-color by video dynamic range
+        self.chk_auto = QCheckBox('Auto color by video (SDR/HDR)')
+        self.chk_auto.setToolTip(
+            'Pick text color/alpha from each target video\'s dynamic '
+            'range: pure white is blinding in HDR, HDR grey is dim in '
+            'SDR. Detected per video (metadata + Dolby Vision scan). '
+            'Wins over "Override color" when enabled.')
+        auto_row = QHBoxLayout()
+        auto_row.addWidget(QLabel('SDR:'))
+        self.btn_auto_sdr = ColorButton(so.auto_sdr_color)
+        self.spin_auto_sdr = QDoubleSpinBox()
+        self.spin_auto_sdr.setRange(0, 1)
+        self.spin_auto_sdr.setSingleStep(0.05)
+        self.spin_auto_sdr.setValue(so.auto_sdr_alpha)
+        auto_row.addWidget(self.btn_auto_sdr)
+        auto_row.addWidget(self.spin_auto_sdr)
+        auto_row.addSpacing(8)
+        auto_row.addWidget(QLabel('HDR:'))
+        self.btn_auto_hdr = ColorButton(so.auto_hdr_color)
+        self.spin_auto_hdr = QDoubleSpinBox()
+        self.spin_auto_hdr.setRange(0, 1)
+        self.spin_auto_hdr.setSingleStep(0.05)
+        self.spin_auto_hdr.setValue(so.auto_hdr_alpha)
+        auto_row.addWidget(self.btn_auto_hdr)
+        auto_row.addWidget(self.spin_auto_hdr)
+        w_auto = QWidget()
+        w_auto.setLayout(auto_row)
+        form.addRow(self.chk_auto, w_auto)
         # outline
         self.chk_outline = QCheckBox('Override outline')
         row_o = QHBoxLayout()
@@ -182,23 +210,27 @@ class OverrideEditor(QWidget):
 
         self._load_flags()
         for w in (self.chk_size, self.chk_family, self.chk_color,
-                  self.chk_outline, self.chk_outline_on, self.chk_shadow,
-                  self.chk_shadow_on, self.chk_lh):
+                  self.chk_auto, self.chk_outline, self.chk_outline_on,
+                  self.chk_shadow, self.chk_shadow_on, self.chk_lh):
             w.toggled.connect(self._commit)
         for w in (self.ed_size, self.ed_outline_w, self.ed_sx, self.ed_sy,
                   self.ed_sb, self.ed_lh):
             w.changed.connect(self._commit)
-        for w in (self.btn_color, self.btn_outline_c, self.btn_shadow_c):
+        for w in (self.btn_color, self.btn_outline_c, self.btn_shadow_c,
+                  self.btn_auto_sdr, self.btn_auto_hdr):
             w.changed.connect(self._commit)
         self.ed_family.editingFinished.connect(self._commit)
         self.spin_alpha.valueChanged.connect(self._commit)
         self.spin_salpha.valueChanged.connect(self._commit)
+        self.spin_auto_sdr.valueChanged.connect(self._commit)
+        self.spin_auto_hdr.valueChanged.connect(self._commit)
 
     def _load_flags(self):
         so = self.so
         self.chk_size.setChecked(so.override_font_size)
         self.chk_family.setChecked(so.override_font_family)
         self.chk_color.setChecked(so.override_color)
+        self.chk_auto.setChecked(so.auto_color)
         self.chk_outline.setChecked(so.override_outline)
         self.chk_outline_on.setChecked(so.outline_enabled)
         self.chk_shadow.setChecked(so.override_shadow)
@@ -214,6 +246,11 @@ class OverrideEditor(QWidget):
                           if f.strip()] or ['sans-serif']
         so.override_color = self.chk_color.isChecked()
         so.color = self.btn_color.color()
+        so.auto_color = self.chk_auto.isChecked()
+        so.auto_sdr_color = self.btn_auto_sdr.color()
+        so.auto_sdr_alpha = self.spin_auto_sdr.value()
+        so.auto_hdr_color = self.btn_auto_hdr.color()
+        so.auto_hdr_alpha = self.spin_auto_hdr.value()
         so.override_outline = self.chk_outline.isChecked()
         so.outline_enabled = self.chk_outline_on.isChecked()
         so.outline_width = self.ed_outline_w.dim()

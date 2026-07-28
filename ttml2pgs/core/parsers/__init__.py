@@ -36,7 +36,26 @@ LANG_TOKENS = {
     'he': 'he', 'heb': 'he', 'hi': 'hi', 'hin': 'hi',
 }
 
-SUBTITLE_EXTENSIONS = ('.ttml', '.dfxp', '.xml', '.vtt', '.webvtt', '.srt')
+SUBTITLE_EXTENSIONS = ('.ttml', '.ttml2', '.dfxp', '.xml', '.vtt', '.webvtt',
+                       '.srt', '.t2p')
+
+
+def normalize_language(lang: str) -> str:
+    """
+    Canonicalize a language tag: 'jp' → 'ja', 'jpn' → 'ja',
+    'en-US' → 'en', 'zh-TW' → 'zh-Hant' … Unknown tags pass through
+    with just the region stripped when the base is recognized.
+    """
+    if not lang:
+        return ''
+    l = lang.strip().replace('_', '-')
+    low = l.lower()
+    if low in LANG_TOKENS:
+        return LANG_TOKENS[low]
+    base = low.split('-')[0]
+    if base in LANG_TOKENS:
+        return LANG_TOKENS[base]
+    return l
 
 
 def detect_language_from_filename(path: str) -> str:
@@ -60,7 +79,7 @@ def detect_language_from_filename(path: str) -> str:
 def detect_format(path: str, head: Optional[str] = None) -> str:
     """Return 'ttml' | 'vtt' | 'srt' | 't2p' | '' (unknown)."""
     ext = os.path.splitext(path)[1].lower()
-    if ext in ('.ttml', '.dfxp'):
+    if ext in ('.ttml', '.ttml2', '.dfxp'):
         return 'ttml'
     if ext in ('.vtt', '.webvtt'):
         return 'vtt'
@@ -101,9 +120,13 @@ def load_subtitle(path: str) -> SubtitleDocument:
         doc = load_project_document(path)
     else:
         raise ValueError(f"Unrecognized subtitle format: {path}")
+    doc.language = normalize_language(doc.language)
     if not doc.language:
         doc.language = detect_language_from_filename(path) or 'en'
     for cue in doc.cues:
-        if not cue.lang:
-            cue.lang = doc.language
+        cue.lang = normalize_language(cue.lang) or doc.language
+    if fmt in ('vtt', 'srt'):
+        # Rebuild flattened 漢字(かんじ) ruby once the language is known.
+        from .ruby import apply_auto_ruby
+        apply_auto_ruby(doc)
     return doc

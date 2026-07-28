@@ -44,8 +44,17 @@ should be on PATH.
   signatures collapse into shared regions (one region for a normal file,
   a second for vertical cues, etc.).
 * **SRT**: tags, `<font color>`, `{\anX}` anchors → derived regions.
-* Language detection from filename/metadata; flattened `漢字(かんじ)`
-  patterns in Japanese VTT/SRT are rebuilt into real ruby.
+* Language detection from filename/metadata (nonstandard tags like
+  ``xml:lang="jp"`` normalized); **auto-ruby** for Japanese VTT *and*
+  SRT: an ASCII ``(`` introducing a kana reading marks ruby — the base
+  runs back to the nearest space (removed as a marker) or the line
+  start; full-width ``（）`` parentheticals are left as real text.
+* Validated against real masters: Netflix (Annihilation, Django
+  Unchained incl. the head-metadata ``Smpte24TimingAdjusted`` variant),
+  Amazon ``.ttml2`` (Civil War, The Holdovers — ``vh`` units,
+  ``fontShear``, CSS-style ``tts:position`` percentage-point offsets),
+  Disney+ WebVTT (The French Dispatch — ``::cue`` classes, shear,
+  tate-chū-yoko, explicit ruby).
 
 Styles are kept as **references + inline styles** and resolved through the
 full cascade at render time — so editing a named style updates every cue
@@ -69,6 +78,8 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   multi-shadow with blur/alpha, background boxes, shear/italics (slanting
   along the correct axis in vertical), emphasis dots/circles/sesame,
   underline/strike.
+* Typographic substitutions (⸺ → ——, 〝〞 → curly quotes …) whenever the
+  only font covering a rare character is a pan-unicode bitmap fallback.
 * **Everything scales.** All lengths live as units (`%`, `vh/vw`, `c`,
   `em`, authored `px` rescaled from the document's declared pixel space),
   resolved against the output canvas — a 3px outline authored for 1080p
@@ -108,16 +119,24 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
 * **Cue pane** — filter by text/region, edit times/region/text inline,
   add/duplicate/delete cues, enable checkboxes, and Time tools (shift
   all/selected/after; manual fps conform with explained presets).
-* **Preview** — shows the selected cue *plus any overlapping cues* exactly
-  as they'll appear; matte guides for other aspect ratios; video-frame
-  backgrounds (with HDR tone-map toggle); a pop-out window locked 1:1 to
-  the output pixel size; "open in external player at this cue" with
+* **Preview** — an **embedded video player** (SubtitleEdit-style,
+  QtMultimedia): plays the bound video with live subtitle overlays kept
+  in sync — overlapping cues included, rendered by the same engine that
+  feeds the .sup. Selecting a cue seeks to its first frame, paused.
+  Falls back automatically to stills mode (matte AR guides + ffmpeg
+  frame extraction with HDR tone-map) when the platform lacks a codec.
+  Pop-out window locked 1:1 to the output pixel size (opening it pauses
+  the embedded player); "open in external player at this cue" with
   MPC-BE / MPC-HC / VLC / mpv presets.
 * **Settings pane** — **per-language global override tabs** (Japanese can
-  run 5.2vh while English runs 4.5vh in the same batch), layout/canvas
-  policy (video dims, force 16:9, content-AR override, safe-area
-  padding), post-processing toggles, plus live **Styles / Regions /
-  Initial** editors for the active document.
+  run 5.2vh while English runs 4.5vh in the same batch) including
+  **auto-color**: per *target video*, HDR episodes get the HDR
+  color/alpha and SDR episodes the SDR one — detected automatically for
+  every queued video (metadata + Dolby Vision binary scan), so series
+  batches need no per-episode fiddling. Plus layout/canvas policy
+  (video dims, force 16:9, content-AR override, safe-area padding),
+  post-processing toggles, and live **Styles / Regions / Initial**
+  editors for the active document.
 * **Save/Load** native `.t2p` projects (lossless document + overrides +
   bindings); export TTML / WebVTT / SRT (lossy where the target format
   can't express a feature).
@@ -152,9 +171,11 @@ tests/
 ## Known limitations
 * No bidi/RTL shaping yet (Arabic/Hebrew subtitles).
 * `rubyReserve`, `textOrientation: sideways/upright` overrides, and
-  gradual `line`-number snap positioning use sensible approximations.
-* The preview's "video playback" is frame-accurate stills + external
-  player hand-off, not an embedded player.
-* Rendering is single-process; a typical 550-cue CJK episode renders +
-  encodes in about a minute on a modest CPU (several times the v1 Chrome
-  pipeline; further parallelism is a straightforward future optimization).
+  `line`-number (non-percent) positioning use sensible approximations.
+* Embedded playback depends on platform codecs (Windows Media
+  Foundation / GStreamer); files it can't decode automatically fall
+  back to stills + external-player hand-off.
+* Rendering is single-process; a real 1372-cue Japanese feature (ruby,
+  vertical, shear) renders + encodes in under two minutes on a modest
+  CPU — several times the v1 Chrome pipeline; further parallelism is a
+  straightforward future optimization.

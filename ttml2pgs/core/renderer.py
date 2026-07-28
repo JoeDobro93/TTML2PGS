@@ -129,10 +129,12 @@ class RenderedCue:
 
 class CueRenderer:
     def __init__(self, doc: SubtitleDocument, canvas: CanvasSpec,
-                 overrides: Optional[OverrideSet] = None):
+                 overrides: Optional[OverrideSet] = None,
+                 is_hdr: bool = False):
         self.doc = doc
         self.canvas = canvas
         self.overrides = overrides or OverrideSet()
+        self.is_hdr = is_hdr
         self.engine = LayoutEngine()
         self.fm = FontManager.instance()
 
@@ -149,7 +151,7 @@ class CueRenderer:
         region = self.doc.get_region(cue)
         lang = cue.lang or self.doc.language
         so = self.overrides.for_language(lang)
-        ov_style = so.to_style()
+        ov_style = so.to_style(is_hdr=self.is_hdr)
 
         reg_spec = self.doc.specified_style(region.style_refs, region.style)
         vertical = self._is_vertical(reg_spec, cue)
@@ -289,10 +291,13 @@ class CueRenderer:
 
     def _text_align(self, para: 'ParaStyle', reg_spec: Style,
                     vertical: bool) -> str:
-        # 'center' is the subtitle-appropriate default when nothing is
-        # specified anywhere (spec says 'start', but every real subtitle
-        # authoring house sets textAlign explicitly).
-        ta = para.text_align or reg_spec.text_align or 'center'
+        # Defaults when nothing is specified anywhere: horizontal subtitles
+        # center (every authoring house sets textAlign explicitly; center is
+        # the subtitle-appropriate fallback), vertical columns start at the
+        # top (the spec 'start' default — matches Netflix vertical masters
+        # whose vertical styles carry no textAlign).
+        ta = para.text_align or reg_spec.text_align or \
+            ('start' if vertical else 'center')
         # physical mapping (LTR assumption)
         return {'left': 'start', 'right': 'end'}.get(ta, ta)
 

@@ -170,7 +170,8 @@ class MainWindow(QMainWindow):
             sess.doc, self.state.overrides,
             sess.video_path,
             sess.video_info.resolution if sess.video_info else None,
-            self.state.settings)
+            self.state.settings,
+            is_hdr=bool(sess.video_info and sess.video_info.is_hdr))
 
     def _session_changed(self, row: int):
         sess = self.state.active
@@ -230,7 +231,8 @@ class MainWindow(QMainWindow):
             target_fps=sess.target_fps(),
             retime=sess.retime_plan(),
             offset_ms=sess.offset_ms,
-            selected_only=False)
+            selected_only=self.sources_pane.selected_cues_only(),
+            is_hdr=bool(sess.video_info and sess.video_info.is_hdr))
         # snapshot doc + overrides so later edits don't affect queued work
         doc_snapshot = copy.deepcopy(sess.doc)
         ov_snapshot = copy.deepcopy(self.state.overrides)

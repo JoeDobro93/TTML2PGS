@@ -32,6 +32,7 @@ class RenderSettings:
     retime: Optional[RetimePlan] = None
     offset_ms: float = 0.0
     selected_only: bool = False                # render only enabled cues
+    is_hdr: bool = False                       # target video dynamic range
 
     def to_dict(self) -> dict:
         return {
@@ -43,6 +44,7 @@ class RenderSettings:
                         self.retime.description] if self.retime else None),
             'offset_ms': self.offset_ms,
             'selected_only': self.selected_only,
+            'is_hdr': self.is_hdr,
         }
 
     @staticmethod
@@ -58,6 +60,7 @@ class RenderSettings:
             rs.retime = RetimePlan(Fraction(rt[0]), float(rt[1]), rt[2])
         rs.offset_ms = float(d.get('offset_ms', 0.0))
         rs.selected_only = bool(d.get('selected_only', False))
+        rs.is_hdr = bool(d.get('is_hdr', False))
         return rs
 
 
@@ -86,7 +89,8 @@ class RenderPipeline:
         """
         s = self.settings
         self.canvas = compute_canvas(s.video_res, self.overrides.layout)
-        renderer = CueRenderer(self.doc, self.canvas, self.overrides)
+        renderer = CueRenderer(self.doc, self.canvas, self.overrides,
+                               is_hdr=s.is_hdr)
 
         cues = [c for c in self.doc.sorted_cues()
                 if (c.enabled or not s.selected_only)]

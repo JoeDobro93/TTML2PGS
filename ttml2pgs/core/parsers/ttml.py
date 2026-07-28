@@ -167,8 +167,18 @@ class TTMLParser:
             m = re.match(r'\s*(\d+)\s+(\d+)\s*$', mult)
             if m:
                 rate = rate * Fraction(int(m.group(1)), int(m.group(2)))
-        # Netflix quirk: SMPTE-24 adjusted timing => effective 23.976
+        # Netflix quirk: SMPTE-24 adjusted timing => effective 23.976.
+        # The flag lives on the root in some masters and on
+        # <head><metadata nttm:…> in others — check both.
         smpte24 = _get_attr(root, 'Smpte24TimingAdjusted')
+        if not smpte24:
+            head = self._find(root, 'head')
+            if head is not None:
+                for child in head:
+                    if _local(child.tag) == 'metadata':
+                        smpte24 = _get_attr(child, 'Smpte24TimingAdjusted')
+                        if smpte24:
+                            break
         if smpte24 and smpte24.strip().lower() == 'true':
             rate = Fraction(24000, 1001)
         if rate is not None:
@@ -315,25 +325,54 @@ class TTMLParser:
         if v is None and pending_center > 0:
             v = ('center', None)
             pending_center -= 1
+        # CSS: a single-component position implies 'center' for the other
+        if h is not None and v is None:
+            v = ('center', None)
+        elif v is not None and h is None:
+            h = ('center', None)
 
+        # CSS <position> semantics (TTML2 §10.2.27): a *percentage* offset
+        # from an edge is relative to (container - region), i.e. point
+        # anchoring — "top 50%" means vertically centered. Absolute units
+        # (px/rw/rh/c) are plain distances from that edge.
         if h is not None:
             kind, off = h
             if kind == 'left':
-                region.x_edge, region.x = 'left', (off or Dim(0, '%'))
+                if off is None:
+                    region.x_edge, region.x = 'point', Dim(0, '%')
+                elif off.unit == '%':
+                    region.x_edge, region.x = 'point', off
+                else:
+                    region.x_edge, region.x = 'left', off
             elif kind == 'right':
-                region.x_edge, region.x = 'right', (off or Dim(0, '%'))
+                if off is None:
+                    region.x_edge, region.x = 'point', Dim(100, '%')
+                elif off.unit == '%':
+                    region.x_edge, region.x = 'point', Dim(100 - off.value, '%')
+                else:
+                    region.x_edge, region.x = 'right', off
             elif kind == 'center':
-                region.x_edge, region.x = 'center', Dim(50, '%')
+                region.x_edge, region.x = 'point', Dim(50, '%')
             elif kind == 'point':
                 region.x_edge, region.x = 'point', off
         if v is not None:
             kind, off = v
             if kind == 'top':
-                region.y_edge, region.y = 'top', (off or Dim(0, '%'))
+                if off is None:
+                    region.y_edge, region.y = 'point', Dim(0, '%')
+                elif off.unit == '%':
+                    region.y_edge, region.y = 'point', off
+                else:
+                    region.y_edge, region.y = 'top', off
             elif kind == 'bottom':
-                region.y_edge, region.y = 'bottom', (off or Dim(0, '%'))
+                if off is None:
+                    region.y_edge, region.y = 'point', Dim(100, '%')
+                elif off.unit == '%':
+                    region.y_edge, region.y = 'point', Dim(100 - off.value, '%')
+                else:
+                    region.y_edge, region.y = 'bottom', off
             elif kind == 'center':
-                region.y_edge, region.y = 'center', Dim(50, '%')
+                region.y_edge, region.y = 'point', Dim(50, '%')
             elif kind == 'point':
                 region.y_edge, region.y = 'point', off
 

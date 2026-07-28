@@ -59,10 +59,10 @@ class DocumentSession:
 
     def retime_plan(self) -> Optional[RetimePlan]:
         if self.use_manual_conform:
-            if self.manual_src_fps and self.manual_dst_fps and \
-                    self.manual_src_fps != self.manual_dst_fps:
-                return RetimePlan.conform(self.manual_src_fps,
-                                          self.manual_dst_fps)
+            src = self.manual_src_fps or self.doc.fps
+            dst = self.manual_dst_fps
+            if src and dst and src != dst:
+                return RetimePlan.conform(src, dst)
             return None
         video_fps = self.video_info.fps if self.video_info else None
         return suggest_conform(self.doc.fps, video_fps)

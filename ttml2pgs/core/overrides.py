@@ -49,15 +49,30 @@ class StyleOverrides:
     override_line_height: bool = False
     line_height: Dim = field(default_factory=lambda: Dim(1.25, ''))
 
+    #: Auto-color: pick text color/alpha from the *target video's* dynamic
+    #: range, so batches mixing HDR and SDR episodes each get suitable
+    #: levels (pure white is blinding in HDR; HDR grey is dim in SDR).
+    auto_color: bool = False
+    auto_sdr_color: RGBA = (229, 229, 229, 255)     # SDR White
+    auto_sdr_alpha: float = 0.90
+    auto_hdr_color: RGBA = (161, 161, 161, 255)     # HDR Grey
+    auto_hdr_alpha: float = 0.90
+
     # ------------------------------------------------------------------ #
-    def to_style(self) -> Style:
-        """Convert enabled overrides into a Style applied over the cascade."""
+    def to_style(self, is_hdr: Optional[bool] = None) -> Style:
+        """
+        Convert enabled overrides into a Style applied over the cascade.
+        is_hdr — the target video's dynamic range (None = unknown → SDR),
+        consumed by auto-color.
+        """
         st = Style(id='__overrides__')
         if self.override_font_size:
             st.font_size = self.font_size
         if self.override_font_family:
             st.font_family = list(self.font_family)
-        if self.override_color:
+        if self.auto_color:
+            st.color = self.auto_hdr_color if is_hdr else self.auto_sdr_color
+        elif self.override_color:
             st.color = self.color
         if self.override_outline:
             st.outline_width = (self.outline_width if self.outline_enabled
@@ -73,8 +88,11 @@ class StyleOverrides:
                 st.shadows = []
         if self.override_line_height:
             st.line_height = self.line_height
-        if self.opacity_mult != 1.0:
-            st.opacity_mult = self.opacity_mult
+        alpha = self.opacity_mult
+        if self.auto_color:
+            alpha *= self.auto_hdr_alpha if is_hdr else self.auto_sdr_alpha
+        if alpha != 1.0:
+            st.opacity_mult = alpha
         return st
 
     # -- (de)serialization --------------------------------------------- #

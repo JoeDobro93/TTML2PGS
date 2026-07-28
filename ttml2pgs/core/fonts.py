@@ -420,6 +420,26 @@ class FontManager:
                 return rec
         return candidates[0] if candidates else None
 
+    def face_covering(self, candidates: Sequence[FaceRecord], ch: str
+                      ) -> Optional[FaceRecord]:
+        """Like pick_face but returns None when nothing covers the char."""
+        if ch.isspace():
+            return candidates[0] if candidates else None
+        cp = ord(ch)
+        for rec in candidates:
+            if self.covers(rec, cp):
+                return rec
+        return None
+
+    _LOW_QUALITY_MARKERS = ('unifont', 'lastresort')
+
+    @classmethod
+    def is_low_quality(cls, rec: FaceRecord) -> bool:
+        """Pan-unicode bitmap-style fallbacks — cover everything, look bad.
+        Typographic substitutions are preferred over glyphs from these."""
+        n = _norm_family(' '.join(rec.families))
+        return any(m in n for m in cls._LOW_QUALITY_MARKERS)
+
     def ft_face(self, path: str, index: int, size_px: float = 0
                 ) -> Optional[freetype.Face]:
         # size-less shared face for coverage; rasterizer sets sizes itself
