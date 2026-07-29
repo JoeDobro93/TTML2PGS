@@ -1015,6 +1015,144 @@ class TestPipelineAndQueue(unittest.TestCase):
         rebuilt.root = tree2
         self.assertEqual(rebuilt.plain_text(), 'x⟦y⟧z')
 
+    def test_ruby_baked_inline_and_styles_pruned(self):
+        """Ruby roles are baked onto spans at load; role-only styles are
+        pruned — rendering must be identical to the raw parse."""
+        from ttml2pgs.core.parsers.ttml import TTMLParser
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        # no surviving named style carries a ruby role
+        for sid, st in doc.styles.items():
+            self.assertIsNone(st.ruby, f'{sid} still has a ruby role')
+        # raw parse (no bake/prune) renders identically
+        raw = TTMLParser().parse_file(sample('netflix_ja.ttml'))
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        r_norm = CueRenderer(doc, canvas, OverrideSet())
+        r_raw = CueRenderer(raw, canvas, OverrideSet())
+        matched = 0
+        for cue_n, cue_r in zip(doc.sorted_cues(), raw.sorted_cues()):
+            a = r_norm.render_cue(cue_n)
+            b = r_raw.render_cue(cue_r)
+            if a is None or b is None:
+                continue
+            self.assertEqual((a.x, a.y), (b.x, b.y))
+            self.assertTrue(np.array_equal(a.bitmap, b.bitmap),
+                            'bake/prune changed rendering')
+            matched += 1
+        self.assertGreater(matched, 0)
+
+    def test_prune_noop_styles_edges(self):
+        from ttml2pgs.core.model import Style, SubtitleDocument, Cue
+        from ttml2pgs.core.parsers import prune_noop_styles
+        from ttml2pgs.core.units import Dim
+
+        def make_doc(extra=None):
+            d = SubtitleDocument()
+            d.styles['noop'] = Style(id='noop', font_size=Dim(100, '%'),
+                                     font_weight='normal',
+                                     font_style='normal')
+            d.styles['role'] = Style(id='role', ruby='base')
+            d.styles['keep'] = Style(id='keep', ruby='container',
+                                     color=(255, 0, 0, 255))
+            if extra:
+                d.styles['boldy'] = Style(id='boldy', font_weight='bold')
+            c = Cue(begin_ms=0, end_ms=1000)
+            c.style_refs = ['noop', 'role', 'keep']
+            d.cues.append(c)
+            return d
+
+        d = make_doc()
+        n = prune_noop_styles(d)
+        self.assertEqual(n, 2)                       # noop + role
+        self.assertEqual(set(d.styles), {'keep'})    # ruby+color stays
+        self.assertEqual(d.cues[0].style_refs, ['keep'])
+
+        # an explicit weight:normal is NOT pruned when something in the
+        # document sets bold (it may be cancelling it)
+        d2 = make_doc(extra=True)
+        prune_noop_styles(d2)
+        self.assertIn('noop', d2.styles)
+
+    def test_ruby_markup_editing(self):
+        try:
+            from ttml2pgs.ui.widgets.cue_editor import CueMarkup
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        import re as _re
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        cue = next(c for c in doc.cues
+                   if 'ル1' in CueMarkup.from_cue(doc, c).text)
+        mk = CueMarkup.from_cue(doc, cue)
+
+        def ann_texts(root):
+            out = []
+
+            def walk(n, chain):
+                for ch in n.children:
+                    if ch.kind == 'span':
+                        sub = chain + [(ch.style_refs, ch.inline_style)]
+                        role = doc.resolve_style(sub).ruby or ''
+                        if role in ('text', 'textContainer'):
+                            out.append(ch.plain_text())
+                        walk(ch, sub)
+            walk(root, [(cue.style_refs, cue.inline_style)])
+            return out
+
+        # change the reading inside the () — annotation must follow
+        edited = _re.sub(r'\(([^)]*)\)', '(テスト)', mk.text, count=1)
+        tree, reason = mk.to_tree(edited)
+        self.assertIsNotNone(tree, reason)
+        self.assertIn('テスト', ann_texts(tree))
+
+        # deleting the (reading) dissolves the ruby into plain text
+        dissolved = _re.sub(r'\(([^)]*)\)', '', mk.text, count=1)
+        tree2, reason2 = mk.to_tree(dissolved)
+        self.assertIsNotNone(tree2, reason2)
+        self.assertLess(len(ann_texts(tree2)), len(ann_texts(tree)))
+
+        # a style chip may not open inside a ruby block
+        sid = sorted(doc.styles.keys())[0] if doc.styles else None
+        if sid:
+            bad = mk.text.replace('(', f'⟦{sid}(', 1)
+            t3, r3 = mk.to_tree(bad)
+            self.assertIsNone(t3)
+
+    def test_wrap_ruby_offscreen(self):
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        _app = QApplication.instance() or QApplication([])
+        from ttml2pgs.ui.widgets.cue_editor import CueMarkup, TokenStyleEdit
+        doc = load_subtitle(sample('basic.srt'))
+        cue = doc.cues[0]
+        mk = CueMarkup.from_cue(doc, cue)
+        ed = TokenStyleEdit()
+        ed.load(mk)
+        c = ed.textCursor()
+        c.setPosition(0)
+        c.setPosition(2, c.MoveMode.KeepAnchor)   # first two chars = base
+        ed.setTextCursor(c)
+        ed.wrap_ruby()
+        ed.textCursor().insertText('よみ')         # type the reading
+        text = ed._serialize()
+        self.assertIn('⟦ル1', text)
+        self.assertIn('(よみ)', text)
+        tree, reason = mk.to_tree(text)
+        self.assertIsNotNone(tree, reason)
+        roles = []
+
+        def walk(n):
+            for ch in n.children:
+                if ch.kind == 'span':
+                    if ch.inline_style is not None and \
+                            ch.inline_style.ruby:
+                        roles.append(ch.inline_style.ruby)
+                    walk(ch)
+        walk(tree)
+        self.assertIn('container', roles)
+
     def test_style_hints(self):
         from ttml2pgs.core.model import Style, style_hints
         from ttml2pgs.core.units import Dim
@@ -1029,6 +1167,12 @@ class TestPipelineAndQueue(unittest.TestCase):
         self.assertEqual(style_hints(Style()), '')
         self.assertIn('bold', style_hints(Style(font_weight='bold')))
         self.assertIn('vertical', style_hints(Style(writing_mode='tbrl')))
+        # explicit 'normal' weight/style adds no hint; nor does a lone
+        # ruby_position
+        self.assertEqual(style_hints(Style(font_weight='normal')), '')
+        self.assertEqual(style_hints(Style(font_style='normal')), '')
+        self.assertEqual(style_hints(Style(ruby_position='after')), '')
+        self.assertIn('italics', style_hints(Style(font_style='italic')))
 
     def test_used_styles_spans(self):
         try:

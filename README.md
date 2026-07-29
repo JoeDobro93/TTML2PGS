@@ -151,8 +151,12 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   auto-normalize into nested spans); deleting a token removes its
   partner and keeps the text. Only existing styles can be applied, and
   any edit that would corrupt the structure reverts with an
-  explanation. Ruby/tate-chū-yoko blocks appear as solid chips so
-  complex structure survives; the cue-level (`<p>`) style refs are
+  explanation. **Furigana is directly editable**: ruby shows as
+  `ルビ▸ 漢字(かんじ) ◂ルビ` with the base and reading as plain text —
+  edit either, delete the `(reading)` to drop the ruby, or select text
+  and hit ルビ to add new furigana (identical for TTML/VTT/SRT since
+  ruby structure is normalized at load). Tate-chū-yoko and other
+  complex blocks stay as solid chips. Cue-level (`<p>`) style refs are
   editable on the line above.
 * **Preview** — an **embedded video player** (SubtitleEdit-style):
   plays the bound video with live subtitle overlays kept in sync —

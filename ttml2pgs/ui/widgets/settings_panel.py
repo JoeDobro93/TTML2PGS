@@ -703,16 +703,8 @@ class StyleEditor(QWidget):
         self.e_shear.setRange(-45, 45)
         self.e_shear.setDecimals(2)
         form.addRow(self.c_shear, self.e_shear)
-        # ruby / emphasis
-        self.c_ruby = add_row('Ruby role')
-        self.e_ruby = QComboBox()
-        self.e_ruby.addItems(['container', 'base', 'text', 'baseContainer',
-                              'textContainer', 'delimiter'])
-        form.addRow(self.c_ruby, self.e_ruby)
-        self.c_rpos = add_row('Ruby position')
-        self.e_rpos = QComboBox()
-        self.e_rpos.addItems(['before', 'after'])
-        form.addRow(self.c_rpos, self.e_rpos)
+        # emphasis / combine (ruby roles are structural — edited in the
+        # Selected-cue pane, not per style)
         self.c_emph = add_row('Text emphasis')
         self.e_emph = QComboBox()
         self.e_emph.addItems(['filled dot', 'open dot', 'filled circle',
@@ -732,7 +724,6 @@ class StyleEditor(QWidget):
             (self.c_talign, self.e_talign), (self.c_dalign, self.e_dalign),
             (self.c_mra, self.e_mra), (self.c_lh, self.e_lh),
             (self.c_wm, self.e_wm), (self.c_shear, self.e_shear),
-            (self.c_ruby, self.e_ruby), (self.c_rpos, self.e_rpos),
             (self.c_emph, self.e_emph), (self.c_tcy, self.e_tcy),
         ]
         for chk, _ in self._rows:
@@ -743,8 +734,7 @@ class StyleEditor(QWidget):
         for w in (self.e_color, self.e_bg, self.e_outline_c, self.e_sc):
             w.changed.connect(self._commit)
         for w in (self.e_weight, self.e_style, self.e_talign, self.e_dalign,
-                  self.e_mra, self.e_wm, self.e_ruby, self.e_rpos,
-                  self.e_emph, self.e_tcy):
+                  self.e_mra, self.e_wm, self.e_emph, self.e_tcy):
             w.currentTextChanged.connect(self._commit)
         self.e_family.editingFinished.connect(self._commit)
         self.e_shear.valueChanged.connect(self._commit)
@@ -800,12 +790,6 @@ class StyleEditor(QWidget):
         self.c_shear.setChecked(s.shear is not None)
         if s.shear is not None:
             self.e_shear.setValue(s.shear)
-        self.c_ruby.setChecked(s.ruby is not None)
-        if s.ruby:
-            self.e_ruby.setCurrentText(s.ruby)
-        self.c_rpos.setChecked(s.ruby_position is not None)
-        if s.ruby_position:
-            self.e_rpos.setCurrentText(s.ruby_position)
         self.c_emph.setChecked(s.text_emphasis_style is not None)
         if s.text_emphasis_style:
             self.e_emph.setCurrentText(s.text_emphasis_style)
@@ -849,9 +833,6 @@ class StyleEditor(QWidget):
         s.writing_mode = self.e_wm.currentText() \
             if self.c_wm.isChecked() else None
         s.shear = self.e_shear.value() if self.c_shear.isChecked() else None
-        s.ruby = self.e_ruby.currentText() if self.c_ruby.isChecked() else None
-        s.ruby_position = self.e_rpos.currentText() \
-            if self.c_rpos.isChecked() else None
         s.text_emphasis_style = self.e_emph.currentText() \
             if self.c_emph.isChecked() else None
         s.text_combine = self.e_tcy.currentText() \

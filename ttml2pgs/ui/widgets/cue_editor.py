@@ -105,6 +105,13 @@ def _atom_preview(node: SpanNode, doc: SubtitleDocument) -> str:
     return ''.join(out)
 
 
+#: default shells for ruby blocks created in the editor
+def _default_ruby_shells():
+    return (([], Style(ruby='container'), {}),
+            ([], Style(ruby='base'), {}),
+            ([], Style(ruby='text'), {}))
+
+
 @dataclass
 class CueMarkup:
     """The editable representation of one cue's content."""
@@ -112,14 +119,84 @@ class CueMarkup:
     text: str = ''
     #: ✎N shells: (style_refs, inline_style, meta) preserved verbatim
     shells: List[tuple] = field(default_factory=list)
-    #: ≡N atoms: whole subtrees preserved verbatim (ruby/TCY/lang spans)
+    #: ≡N atoms: whole subtrees preserved verbatim (TCY/lang/complex ruby)
     atoms: List[SpanNode] = field(default_factory=list)
+    #: ルN editable ruby blocks: (container, base, annotation) shells
+    rubies: List[tuple] = field(default_factory=list)
+
+    def new_ruby(self) -> int:
+        """Allocate a ruby slot for editor-created furigana; returns N."""
+        self.rubies.append(_default_ruby_shells())
+        return len(self.rubies)
 
     # ------------------------------------------------------------------ #
     @staticmethod
     def from_cue(doc: SubtitleDocument, cue: Cue) -> 'CueMarkup':
         mk = CueMarkup(doc=doc)
         parts: List[str] = []
+
+        def shell_of(sp: SpanNode) -> tuple:
+            return (list(sp.style_refs), copy.deepcopy(sp.inline_style),
+                    dict(sp.meta))
+
+        def role_of(sp: SpanNode) -> str:
+            try:
+                return doc.specified_style(sp.style_refs,
+                                           sp.inline_style).ruby or ''
+            except Exception:
+                return ''
+
+        def extract_ruby(cont: SpanNode):
+            """(base_text, ann_text, base_shell, ann_shell) for a SIMPLE
+            ruby container, else None (falls back to a frozen atom)."""
+            base_parts: List[str] = []
+            ann_parts: List[str] = []
+            base_shell = ann_shell = None
+            n_base = n_ann = 0
+
+            def pure_text(sp: SpanNode) -> Optional[str]:
+                out = []
+                for ch in sp.children:
+                    if ch.kind == 'text':
+                        out.append(ch.text)
+                    else:
+                        return None
+                return ''.join(out)
+
+            for ch in cont.children:
+                if ch.kind == 'text':
+                    base_parts.append(ch.text)
+                    continue
+                if ch.kind == 'br':
+                    return None
+                role = role_of(ch)
+                if role in ('base', 'baseContainer'):
+                    t = pure_text(ch)
+                    if t is None:
+                        return None
+                    base_parts.append(t)
+                    base_shell = base_shell or shell_of(ch)
+                    n_base += 1
+                elif role in ('text', 'textContainer'):
+                    t = pure_text(ch)
+                    if t is None:
+                        return None
+                    ann_parts.append(t)
+                    ann_shell = ann_shell or shell_of(ch)
+                    n_ann += 1
+                elif role == 'delimiter':
+                    continue
+                else:
+                    return None
+            if n_base > 1 or n_ann != 1:
+                return None
+            base = ''.join(base_parts)
+            ann = ''.join(ann_parts)
+            if not base or '(' in base + ann or ')' in base + ann or \
+                    '（' in base + ann or '）' in base + ann or \
+                    '\n' in base + ann:
+                return None
+            return base, ann, base_shell, ann_shell
 
         def is_structural(sp: SpanNode) -> bool:
             if sp.meta:
@@ -139,6 +216,19 @@ class CueMarkup:
                     parts.append('\n')
                 elif ch.kind == 'span':
                     if is_structural(ch):
+                        if role_of(ch) == 'container':
+                            got = extract_ruby(ch)
+                            if got is not None:
+                                base, ann, bsh, ash = got
+                                mk.rubies.append(
+                                    (shell_of(ch),
+                                     bsh or _default_ruby_shells()[1],
+                                     ash or _default_ruby_shells()[2]))
+                                n = len(mk.rubies)
+                                parts.append(
+                                    f'{OPEN}ル{n}{_esc_text(base)}'
+                                    f'({_esc_text(ann)})ル{n}{CLOSE}')
+                                continue
                         mk.atoms.append(ch)
                         n = len(mk.atoms)
                         parts.append(
@@ -176,6 +266,7 @@ class CueMarkup:
     def _token_ids(self) -> List[str]:
         ids = list(self.doc.styles.keys()) + list(_BI_IDS)
         ids += [f'✎{i + 1}' for i in range(len(self.shells))]
+        ids += [f'ル{i + 1}' for i in range(len(self.rubies))]
         return sorted(ids, key=len, reverse=True)
 
     def parse(self, text: str):
@@ -194,6 +285,8 @@ class CueMarkup:
         items: List[tuple] = []
         tokens: List[tuple] = []
         active: List[str] = []
+        ruby_open: Optional[str] = None      # ルN currently open
+        ruby_start = 0                       # items index at its open
         pos, n = 0, len(text)
         while pos < n:
             ch = text[pos]
@@ -201,6 +294,9 @@ class CueMarkup:
             if ch == OPEN:
                 for i, lit in enumerate(atom_lits):
                     if text.startswith(lit, pos):
+                        if ruby_open:
+                            return None, ('only plain base(reading) text '
+                                          'can sit inside a ruby block')
                         items.append(('atom', i, tuple(active)))
                         tokens.append((pos, pos + len(lit), f'≡{i + 1}',
                                        'atom'))
@@ -211,10 +307,16 @@ class CueMarkup:
                     continue
                 for sid in ids:
                     if text.startswith(OPEN + sid, pos):
+                        if ruby_open:
+                            return None, ('styles can\'t start inside a '
+                                          'ruby block')
                         if sid in active:
                             return None, (f'style "{sid}" can\'t be '
                                           f'nested inside itself')
                         active.append(sid)
+                        if sid.startswith('ル'):
+                            ruby_open = sid
+                            ruby_start = len(items)
                         tokens.append((pos, pos + 1 + len(sid), sid, 'open'))
                         pos += 1 + len(sid)
                         matched = True
@@ -225,9 +327,21 @@ class CueMarkup:
             # close token?
             for sid in ids:
                 if text.startswith(sid + CLOSE, pos):
+                    if ruby_open and sid != ruby_open:
+                        return None, ('styles can\'t end inside a ruby '
+                                      'block')
                     if sid not in active:
                         return None, (f'"{sid}⟧" appears before its '
                                       f'matching ⟦ start')
+                    if sid.startswith('ル'):
+                        ok, repl = self._finish_ruby(
+                            sid, items[ruby_start:],
+                            tuple(a for a in active if a != sid))
+                        if not ok:
+                            return None, repl
+                        del items[ruby_start:]
+                        items.extend(repl)
+                        ruby_open = None
                     active.remove(sid)
                     tokens.append((pos, pos + len(sid) + 1, sid, 'close'))
                     pos += len(sid) + 1
@@ -238,6 +352,8 @@ class CueMarkup:
             if ch == CLOSE:
                 return None, 'stray ⟧ (broken token)'
             if ch == '\n':
+                if ruby_open:
+                    return None, 'ruby blocks can\'t contain line breaks'
                 items.append(('br', tuple(active)))
             else:
                 items.append(('ch', ch, tuple(active)))
@@ -245,6 +361,26 @@ class CueMarkup:
         if active:
             return None, f'style "{active[-1]}" is never closed'
         return (items, tokens), ''
+
+    def _finish_ruby(self, sid: str, inner: List[tuple], active: tuple):
+        """Validate ルN inner content: 'base(reading)'. Returns
+        (True, replacement_items) or (False, reason)."""
+        chars = ''.join(it[1] for it in inner if it[0] == 'ch')
+        if any(it[0] != 'ch' for it in inner):
+            return False, ('only plain base(reading) text can sit inside '
+                           'a ruby block')
+        m = re.fullmatch(r'([^()（）]*)(?:[(（]([^()（）]*)[)）])?', chars)
+        if m is None:
+            return False, ('ruby blocks hold exactly one base(reading) — '
+                           'e.g. 漢字(かんじ)')
+        base, reading = m.group(1), m.group(2)
+        if reading:
+            if not base:
+                return False, 'ruby needs base text before the (reading)'
+            idx = int(sid[1:]) - 1
+            return True, [('ruby', idx, base, reading, active)]
+        # no (or empty) reading → the ruby dissolves into plain text
+        return True, [('ch', c, active) for c in base]
 
     # ------------------------------------------------------------------ #
     def to_tree(self, text: str) -> Tuple[Optional[SpanNode], str]:
@@ -268,6 +404,24 @@ class CueMarkup:
                 sp.style_refs = [sid]
             return sp
 
+        def span_from_shell(shell: tuple) -> SpanNode:
+            refs, inline, meta = shell
+            sp = SpanNode(kind='span')
+            sp.style_refs = list(refs)
+            sp.inline_style = copy.deepcopy(inline)
+            sp.meta = dict(meta)
+            return sp
+
+        def make_ruby(idx: int, base: str, reading: str) -> SpanNode:
+            cont_sh, base_sh, ann_sh = self.rubies[idx]
+            cont = span_from_shell(cont_sh)
+            bs = span_from_shell(base_sh)
+            bs.children = [SpanNode.text_node(_unesc_text(base))]
+            an = span_from_shell(ann_sh)
+            an.children = [SpanNode.text_node(_unesc_text(reading))]
+            cont.children = [bs, an]
+            return cont
+
         def build(seg: List[tuple], depth: int) -> List[SpanNode]:
             out: List[SpanNode] = []
             i = 0
@@ -289,6 +443,9 @@ class CueMarkup:
                         i = j
                     elif it[0] == 'br':
                         out.append(SpanNode.br())
+                        i += 1
+                    elif it[0] == 'ruby':
+                        out.append(make_ruby(it[1], it[2], it[3]))
                         i += 1
                     else:                       # atom
                         out.append(copy.deepcopy(self.atoms[it[1]]))
@@ -315,6 +472,8 @@ def _chip_color(sid: str) -> QColor:
         return QColor(110, 110, 118)
     if sid.startswith('≡'):
         return QColor(96, 82, 128)
+    if sid.startswith('ル'):
+        return QColor(120, 76, 150)
     if sid.startswith('✎'):
         return QColor(128, 96, 64)
     h = (hash(sid) & 0xFFFF) / 0xFFFF
@@ -337,9 +496,11 @@ def _literal_meta(lit: str) -> Tuple[str, str, str]:
         return 'atom', sid, prev or sid
     if lit.startswith(OPEN):
         sid = lit[1:]
-        return 'open', sid, f'{sid} ▸'
+        label = 'ルビ ▸' if sid.startswith('ル') else f'{sid} ▸'
+        return 'open', sid, label
     sid = lit[:-1]
-    return 'close', sid, f'◂ {sid}'
+    label = '◂ ルビ' if sid.startswith('ル') else f'◂ {sid}'
+    return 'close', sid, label
 
 
 class _ChipHandler(QObject, QTextObjectInterface):
@@ -727,6 +888,33 @@ class TokenStyleEdit(QTextEdit):
             self.setTextCursor(cur)
         self._revalidate(commit=True)
 
+    def wrap_ruby(self):
+        """Selection becomes the ruby base; the reading is typed into the
+        () that appear after it."""
+        if self.markup is None:
+            return
+        c = self.textCursor()
+        a, b = (c.selectionStart(), c.selectionEnd()) \
+            if c.hasSelection() else (c.position(), c.position())
+        n = self.markup.new_ruby()
+        sid = f'ル{n}'
+        self._suspend = True
+        cur = self.textCursor()
+        cur.beginEditBlock()
+        try:
+            cur.setPosition(b)
+            cur.insertText('()')
+            cur.insertText(_OBJ, self._chip_format(sid + CLOSE))
+            cur.setPosition(a)
+            cur.insertText(_OBJ, self._chip_format(OPEN + sid))
+        finally:
+            cur.endEditBlock()
+            self._suspend = False
+        # caret between the parens, ready for the reading
+        cur.setPosition(b + 2)
+        self.setTextCursor(cur)
+        self._revalidate(commit=True)
+
     def remove_style_at(self, pos: int, sid: str):
         opens = [t for t in self._doc_tokens
                  if t[3] == sid and t[2] == 'open' and t[0] <= pos]
@@ -900,9 +1088,17 @@ class SelectedCuePane(QWidget):
         self.btn_i.setFont(f)
         self.btn_i.setToolTip('Italicize the selection (independent of '
                               'styles)')
+        self.btn_ruby = QToolButton()
+        self.btn_ruby.setText('ルビ')
+        self.btn_ruby.setToolTip(
+            'Make the selected text a ruby base and type its reading '
+            'into the () that appear — 漢字(かんじ). Edit base/reading '
+            'as plain text inside the ルビ chips; delete the (reading) '
+            'to remove the furigana.')
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_b)
         row.addWidget(self.btn_i)
+        row.addWidget(self.btn_ruby)
         cl.addLayout(row)
 
         self.editor = TokenStyleEdit()
@@ -922,6 +1118,7 @@ class SelectedCuePane(QWidget):
         self.btn_add.clicked.connect(self._add_style_menu)
         self.btn_b.clicked.connect(lambda: self.editor.wrap_selection('b'))
         self.btn_i.clicked.connect(lambda: self.editor.wrap_selection('i'))
+        self.btn_ruby.clicked.connect(self.editor.wrap_ruby)
         self.editor.committed.connect(self._tree_committed)
         self.editor.rejected.connect(self._edit_rejected)
 

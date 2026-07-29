@@ -133,10 +133,140 @@ def load_subtitle(path: str) -> SubtitleDocument:
         # Rebuild flattened 漢字(かんじ) ruby once the language is known.
         from .ruby import apply_auto_ruby
         apply_auto_ruby(doc)
+    if fmt != 't2p':
+        bake_structural_roles(doc)
+        prune_noop_styles(doc)
     n = dedupe_overlapping_duplicates(doc)
     if n:
         doc.metadata['deduplicated_cues'] = str(n)
     return doc
+
+
+def bake_structural_roles(doc: SubtitleDocument) -> None:
+    """
+    Normalize ruby / tate-chū-yoko structure: resolve each span's ruby
+    role (and textCombine) from its style refs and bake it into the
+    span's *inline* style. Afterwards the structure is self-contained —
+    named styles no longer carry any structural meaning, identically
+    for TTML, WebVTT and auto-ruby SRT.
+    """
+    from ..model import Style
+
+    def bake(span) -> None:
+        spec = doc.specified_style(span.style_refs, span.inline_style)
+        updates = {}
+        if spec.ruby and (span.inline_style is None or
+                          span.inline_style.ruby is None):
+            updates['ruby'] = spec.ruby
+        for attr in ('ruby_position', 'ruby_align', 'ruby_scale'):
+            v = getattr(spec, attr)
+            if v is not None and (span.inline_style is None or
+                                  getattr(span.inline_style, attr) is None):
+                updates[attr] = v
+        tc = spec.text_combine
+        if tc and tc != 'none' and (span.inline_style is None or
+                                    span.inline_style.text_combine is None):
+            updates['text_combine'] = tc
+        if updates:
+            if span.inline_style is None:
+                span.inline_style = Style()
+            for k, v in updates.items():
+                setattr(span.inline_style, k, v)
+
+    def walk(node) -> None:
+        for ch in node.children:
+            if ch.kind == 'span':
+                bake(ch)
+                walk(ch)
+
+    for cue in doc.cues:
+        walk(cue.root)
+
+    # roles now live on the spans — clear the vestigial fields from named
+    # styles (styles with other content survive minus the role fields;
+    # role-only styles become empty and are pruned right after)
+    for st in doc.styles.values():
+        st.ruby = None
+        st.ruby_align = None
+        st.ruby_position = None
+        st.ruby_scale = None
+
+
+#: font sizes that are pure no-op multipliers of the parent size
+_NOOP_SIZES = {(100.0, '%'), (1.0, 'em')}
+
+
+def prune_noop_styles(doc: SubtitleDocument) -> int:
+    """
+    Drop named styles that no longer do anything once structure is baked
+    inline: styles whose every set property is a ruby-role field, a
+    100 % / 1em font size, or an explicit 'normal' weight/style.
+
+    Edge case guarded: an explicit ``normal`` CAN matter — it cancels a
+    bold/italic inherited from another style or the initials. It only
+    counts as a no-op when nothing in the document sets bold/italic at
+    all. Returns the number of styles removed.
+    """
+    import dataclasses as _dc
+
+    any_bold = any(s.font_weight not in (None, 'normal')
+                   for s in list(doc.styles.values()) + [doc.initial]) or \
+        any(r.style.font_weight not in (None, 'normal')
+            for r in doc.regions.values())
+    any_italic = any(s.font_style not in (None, 'normal')
+                     for s in list(doc.styles.values()) + [doc.initial]) or \
+        any(r.style.font_style not in (None, 'normal')
+            for r in doc.regions.values())
+
+    role_fields = {'ruby', 'ruby_align', 'ruby_position', 'ruby_scale'}
+
+    def is_noop(st) -> bool:
+        if st.parent_ids:
+            return False
+        for f in _dc.fields(st):
+            if f.name in ('id', 'parent_ids'):
+                continue
+            v = getattr(st, f.name)
+            if v is None:
+                continue
+            if f.name in role_fields:
+                continue
+            if f.name == 'font_size' and (v.value, v.unit) in _NOOP_SIZES:
+                continue
+            if f.name == 'font_weight' and v == 'normal' and not any_bold:
+                continue
+            if f.name == 'font_style' and v == 'normal' and not any_italic:
+                continue
+            return False
+        # nothing meaningful set (fully-empty styles included — role-only
+        # styles become empty once roles are baked inline)
+        return True
+
+    victims = [sid for sid, st in doc.styles.items() if is_noop(st)]
+    if not victims:
+        return 0
+    vs = set(victims)
+    for sid in victims:
+        doc.styles.pop(sid, None)
+
+    def strip(refs):
+        return [r for r in refs if r not in vs]
+
+    for s in doc.styles.values():
+        s.parent_ids = strip(s.parent_ids)
+    for r in doc.regions.values():
+        r.style_refs = strip(r.style_refs)
+
+    def walk(node):
+        node.style_refs = strip(node.style_refs)
+        for ch in node.children:
+            walk(ch)
+
+    for cue in doc.cues:
+        cue.style_refs = strip(cue.style_refs)
+        walk(cue.root)
+    doc.metadata['pruned_styles'] = ' '.join(victims)
+    return len(victims)
 
 
 def dedupe_overlapping_duplicates(doc: SubtitleDocument) -> int:

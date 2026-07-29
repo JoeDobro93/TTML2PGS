@@ -337,7 +337,8 @@ _HINT_GROUPS = [
     (('outline_color', 'outline_width'), 'outline'),
     (('shadows',), 'shadow'),
     (('text_decoration',), 'underline'),
-    (('ruby', 'ruby_align', 'ruby_position', 'ruby_scale'), 'ruby'),
+    # ruby_position alone isn't "ruby text" — no hint for it
+    (('ruby', 'ruby_align', 'ruby_scale'), 'ruby'),
     (('text_combine',), 'tcy'),
     (('text_emphasis_style', 'text_emphasis_color',
       'text_emphasis_position'), 'emphasis'),
@@ -358,8 +359,14 @@ def style_hints(style: Style) -> str:
             v = getattr(style, a, None)
             if v is None:
                 continue
+            # explicit 'normal' does nothing worth flagging
             if a == 'font_weight':
+                if v == 'normal':
+                    continue
                 label = 'bold' if v == 'bold' else 'weight'
+            elif a == 'font_style':
+                if v == 'normal':
+                    continue
             elif a == 'writing_mode':
                 label = 'vertical' if str(v).startswith('tb') else 'writing'
             elif a == 'text_decoration':
