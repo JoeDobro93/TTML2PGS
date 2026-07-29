@@ -47,7 +47,7 @@ class QueuePane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
 
-        bar = QHBoxLayout()
+        # two compact button rows so the pane fits a left/right dock
         self.b_start_all = QPushButton('▶ Render all')
         self.b_start_all.setToolTip(
             'Start every job in the queue (added jobs become queued and '
@@ -64,13 +64,19 @@ class QueuePane(QWidget):
             'Continue paused/started work. Jobs never started stay '
             'waiting for you to start them.')
         self.b_clear = QPushButton('Clear finished')
-        for b in (self.b_start_all, self.b_start_sel, self.b_pause,
-                  self.b_resume, self.b_clear):
-            bar.addWidget(b)
-        bar.addStretch()
+        row1 = QHBoxLayout()
+        row1.addWidget(self.b_start_all)
+        row1.addWidget(self.b_start_sel)
+        row1.addStretch()
+        lay.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(self.b_pause)
+        row2.addWidget(self.b_resume)
+        row2.addWidget(self.b_clear)
+        row2.addStretch()
         self.lbl_status = QLabel('')
-        bar.addWidget(self.lbl_status)
-        lay.addLayout(bar)
+        row2.addWidget(self.lbl_status)
+        lay.addLayout(row2)
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)

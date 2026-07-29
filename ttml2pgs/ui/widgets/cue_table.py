@@ -22,7 +22,21 @@ from ...core.model import Cue, SpanNode, SubtitleDocument
 from ...core.timing import (COMMON_RATES, RetimePlan, format_display_time,
                             parse_display_time)
 
-COL_ON, COL_NUM, COL_START, COL_END, COL_DUR, COL_REGION, COL_TEXT = range(7)
+COL_ON, COL_NUM, COL_START, COL_END, COL_DUR, COL_REGION, COL_STYLE, \
+    COL_TEXT = range(8)
+
+
+def parse_style_refs(doc: SubtitleDocument, text: str):
+    """'s1 s2' → ['s1','s2'] if every id exists; ''/'default' → [];
+    None when an unknown id is mentioned."""
+    text = (text or '').strip()
+    if not text or text.lower() in ('default', '(default)'):
+        return []
+    refs = text.replace(',', ' ').split()
+    for r in refs:
+        if r not in doc.styles:
+            return None
+    return refs
 
 
 def preview_text(doc: SubtitleDocument, cue: Cue) -> str:
@@ -63,7 +77,7 @@ def preview_text(doc: SubtitleDocument, cue: Cue) -> str:
 
 
 class CueModel(QAbstractTableModel):
-    HEADERS = ['', '#', 'Start', 'End', 'Dur', 'Region', 'Text']
+    HEADERS = ['', '#', 'Start', 'End', 'Dur', 'Region', 'Style', 'Text']
 
     cue_edited = pyqtSignal()
 
@@ -72,6 +86,9 @@ class CueModel(QAbstractTableModel):
         self.doc: Optional[SubtitleDocument] = None
         self.cues: List[Cue] = []
         self._previews: dict = {}          # id(cue) -> display text
+        #: optional provider of the current selection — region/style edits
+        #: on a selected row apply to every selected cue
+        self.bulk_targets = None
 
     def set_document(self, doc: Optional[SubtitleDocument]):
         self.beginResetModel()
@@ -113,7 +130,7 @@ class CueModel(QAbstractTableModel):
         c = index.column()
         if c == COL_ON:
             f |= Qt.ItemFlag.ItemIsUserCheckable
-        if c in (COL_START, COL_END, COL_REGION, COL_TEXT):
+        if c in (COL_START, COL_END, COL_REGION, COL_STYLE, COL_TEXT):
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
@@ -131,16 +148,50 @@ class CueModel(QAbstractTableModel):
                 return f"{cue.duration_ms / 1000:.2f}s"
             if c == COL_REGION:
                 return cue.region_id or '(default)'
+            if c == COL_STYLE:
+                if role == Qt.ItemDataRole.EditRole:
+                    return ' '.join(cue.style_refs)
+                txt = ' '.join(cue.style_refs) or 'default'
+                if cue.inline_style is not None:
+                    txt += ' ✎'
+                return txt
             if c == COL_TEXT:
                 if role == Qt.ItemDataRole.EditRole:
                     return cue.plain_text()
                 return self.preview(cue).replace('\n', ' ⏎ ')
+        if role == Qt.ItemDataRole.FontRole and c == COL_STYLE \
+                and not cue.style_refs:
+            from PyQt6.QtGui import QFont
+            f = QFont()
+            f.setItalic(True)
+            return f
         if role == Qt.ItemDataRole.CheckStateRole and c == COL_ON:
             return Qt.CheckState.Checked if cue.enabled \
                 else Qt.CheckState.Unchecked
+        if role == Qt.ItemDataRole.ToolTipRole and c == COL_STYLE:
+            bits = []
+            if cue.style_refs:
+                bits.append('Named styles: ' + ', '.join(cue.style_refs))
+            else:
+                bits.append('No named styles — defers to Initials '
+                            '(document defaults)')
+            if cue.inline_style is not None:
+                bits.append('✎ has inline <p> style overrides — edit in '
+                            'the Selected cue pane')
+            bits.append('Edit: space-separated style ids, or "default".')
+            return '\n'.join(bits)
         if role == Qt.ItemDataRole.ToolTipRole and c == COL_TEXT:
             return self.preview(cue)
         return None
+
+    def _bulk(self, cue: Cue) -> List[Cue]:
+        """Region/style edits on a selected row apply to the whole
+        selection."""
+        if self.bulk_targets is not None:
+            sel = self.bulk_targets()
+            if len(sel) > 1 and cue in sel:
+                return sel
+        return [cue]
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         cue = self.cues[index.row()]
@@ -153,6 +204,7 @@ class CueModel(QAbstractTableModel):
             return True
         if role != Qt.ItemDataRole.EditRole:
             return False
+        many = False
         if c == COL_START:
             ms = parse_display_time(str(value))
             if ms is None:
@@ -166,17 +218,42 @@ class CueModel(QAbstractTableModel):
         elif c == COL_REGION:
             rid = str(value)
             if self.doc and (rid in self.doc.regions or rid == '(default)'):
-                cue.region_id = None if rid == '(default)' else rid
+                targets = self._bulk(cue)
+                for t in targets:
+                    t.region_id = None if rid == '(default)' else rid
+                many = len(targets) > 1
             else:
                 return False
+        elif c == COL_STYLE:
+            if not self.doc:
+                return False
+            refs = parse_style_refs(self.doc, str(value))
+            if refs is None:
+                return False
+            targets = self._bulk(cue)
+            for t in targets:
+                t.style_refs = list(refs)
+            many = len(targets) > 1
         elif c == COL_TEXT:
             _set_plain_text(cue, str(value))
             self._previews.pop(id(cue), None)
         else:
             return False
-        self.dataChanged.emit(index, index)
+        if many:
+            self.dataChanged.emit(
+                self.index(0, c), self.index(self.rowCount() - 1, c))
+        else:
+            self.dataChanged.emit(index, index)
         self.cue_edited.emit()
         return True
+
+    def refresh_cue(self, cue: Cue):
+        """Repaint one cue's row (e.g. after Selected-cue pane edits)."""
+        for row, c in enumerate(self.cues):
+            if c is cue:
+                self.dataChanged.emit(self.index(row, 0),
+                                      self.index(row, COL_TEXT))
+                return
 
     def cue_at(self, row: int) -> Optional[Cue]:
         if 0 <= row < len(self.cues):
@@ -210,6 +287,30 @@ class RegionDelegate(QStyledItemDelegate):
     def setEditorData(self, editor, index):
         editor.setCurrentText(index.data(Qt.ItemDataRole.EditRole)
                               or '(default)')
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText(),
+                      Qt.ItemDataRole.EditRole)
+
+
+class StyleDelegate(QStyledItemDelegate):
+    """Editable combo: pick one named style or type several ids."""
+
+    def __init__(self, model: CueModel, parent=None):
+        super().__init__(parent)
+        self._model = model
+
+    def createEditor(self, parent, option, index):
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.addItem('default')
+        if self._model.doc:
+            combo.addItems(sorted(self._model.doc.styles.keys()))
+        return combo
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentText(index.data(Qt.ItemDataRole.EditRole)
+                              or 'default')
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.currentText(),
@@ -289,10 +390,14 @@ class CuePane(QWidget):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(COL_TEXT, QHeaderView.ResizeMode.Stretch)
         for col, w in ((COL_ON, 28), (COL_NUM, 44), (COL_START, 100),
-                       (COL_END, 100), (COL_DUR, 60), (COL_REGION, 110)):
+                       (COL_END, 100), (COL_DUR, 60), (COL_REGION, 100),
+                       (COL_STYLE, 90)):
             self.table.setColumnWidth(col, w)
         self.table.setItemDelegateForColumn(COL_REGION,
                                             RegionDelegate(self.model, self))
+        self.table.setItemDelegateForColumn(COL_STYLE,
+                                            StyleDelegate(self.model, self))
+        self.model.bulk_targets = self.selected_cues
         lay.addWidget(self.table)
 
         # connections
@@ -329,6 +434,9 @@ class CuePane(QWidget):
 
     def refresh(self):
         self.model.refresh_order()
+
+    def refresh_cue(self, cue: Cue):
+        self.model.refresh_cue(cue)
 
     def refresh_regions(self):
         """Rebuild the region filter after regions were added/renamed/

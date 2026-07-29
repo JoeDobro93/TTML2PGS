@@ -698,10 +698,14 @@ class PreviewPane(QWidget):
             'color — works in stills and player mode. Useful for '
             'checking layout.')
         for w in (self.spin_ar_w, QLabel(':'), self.spin_ar_h,
-                  self.chk_matte, self.btn_bg, self.chk_frames,
-                  self.chk_tonemap, self.chk_regions):
+                  self.chk_matte, self.btn_bg):
             bar.addWidget(w)
         bar.addStretch()
+        # second toolbar row keeps the pane's minimum width low
+        bar2 = QHBoxLayout()
+        for w in (self.chk_frames, self.chk_tonemap, self.chk_regions):
+            bar2.addWidget(w)
+        bar2.addStretch()
         self.btn_popout = QPushButton('Pop out (1:1)')
         self.btn_popout.setToolTip(
             'Float the preview at the output pixel size. In player mode '
@@ -715,9 +719,10 @@ class PreviewPane(QWidget):
             'subtitle sync against real playback. Subtitles are NOT '
             'overlaid there; use the embedded player or pop-out for '
             'overlays.')
-        bar.addWidget(self.btn_popout)
-        bar.addWidget(self.btn_player)
+        bar2.addWidget(self.btn_popout)
+        bar2.addWidget(self.btn_player)
         lay.addLayout(bar)
+        lay.addLayout(bar2)
 
         self._stack = QStackedLayout()
         self.stage = _Stage()
@@ -845,10 +850,12 @@ class PreviewPane(QWidget):
             return
         if self._player_active():
             self._update_overlays(self._pl_position(), force=True)
-        # a stills pop-out wants the extracted video frame behind the cue
-        want_frame = bool(self.video_path) and (
-            (self.popout is not None and not self._popped_player) or
-            (self.chk_frames.isChecked() and not self._player_active()))
+        # frame extraction strictly follows the 'Frames' toggle — for the
+        # stills view and for a stills pop-out alike
+        want_frame = bool(self.video_path) and \
+            self.chk_frames.isChecked() and \
+            (not self._player_active() or
+             (self.popout is not None and not self._popped_player))
         self.worker.request_scene(ctx, self.cue, want_frame,
                                   self.chk_tonemap.isChecked())
 

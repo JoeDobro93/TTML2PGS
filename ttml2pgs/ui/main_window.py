@@ -3,12 +3,13 @@ Main window: workspace layout, menus, queue integration.
 
 Layout
 ------
-┌────────────────────────────┬───────────────────────────┐
-│ Cue pane (top-left)        │ Preview (top-right)       │
-├────────────────────────────┼───────────────────────────┤
-│ Sources (bottom-left)      │ Settings (bottom-right)   │
-└────────────────────────────┴───────────────────────────┘
-        Queue = bottom dock (auto-shows when rendering)
+┌───────┬──────────────────────────┬───────────────────────────┐
+│ Queue │ Cue pane (top-left)      │ Preview (top-right)       │
+│ dock  ├─ Selected cue (collapsed)┼───────────────────────────┤
+│ (left)│ Sources (bottom-left)    │ Settings (bottom-right)   │
+└───────┴──────────────────────────┴───────────────────────────┘
+Queue dock defaults to the left (movable to any edge); showing it
+widens the window when the screen allows.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from ..core.jobqueue import QueueManager
 from ..core.pipeline import RenderSettings
 from ..core.project import save_project
 from .state import AppState, DocumentSession
+from .widgets.cue_editor import SelectedCuePane
 from .widgets.cue_table import CuePane
 from .widgets.preview import PreviewPane
 from .widgets.queue_view import QueuePane
@@ -52,14 +54,25 @@ class MainWindow(QMainWindow):
 
         # ---- panes ---------------------------------------------------- #
         self.cue_pane = CuePane()
+        self.sel_cue_pane = SelectedCuePane()
         self.sources_pane = SourcesPane(self.state)
         self.preview_pane = PreviewPane()
         self.settings_pane = SettingsPane(self.state.overrides,
                                           self.state.settings)
         self.queue_pane = QueuePane(self.queue)
 
+        # cue table + the collapsible selected-cue editor share a column
+        # so expanding the editor borrows space from the table
+        from PyQt6.QtWidgets import QVBoxLayout
+        cue_col = QWidget()
+        ccl = QVBoxLayout(cue_col)
+        ccl.setContentsMargins(0, 0, 0, 0)
+        ccl.setSpacing(0)
+        ccl.addWidget(self.cue_pane, 1)
+        ccl.addWidget(self.sel_cue_pane)
+
         left = QSplitter(Qt.Orientation.Vertical)
-        left.addWidget(self.cue_pane)
+        left.addWidget(cue_col)
         left.addWidget(self.sources_pane)
         left.setSizes([620, 300])
         right = QSplitter(Qt.Orientation.Vertical)
@@ -74,7 +87,8 @@ class MainWindow(QMainWindow):
 
         self.queue_dock = QDockWidget('Render queue', self)
         self.queue_dock.setWidget(self.queue_pane)
-        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea,
+        # default LEFT (drag to top/bottom/right if preferred)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea,
                            self.queue_dock)
         self.queue_dock.hide()
 
@@ -87,7 +101,9 @@ class MainWindow(QMainWindow):
         self.sources_pane.render_all_requested.connect(self._render_all)
         self.sources_pane.add_sup_requested.connect(self._queue_external_sup)
         self.cue_pane.cue_selected.connect(self.preview_pane.set_cue)
+        self.cue_pane.cue_selected.connect(self._cue_selected_for_editor)
         self.cue_pane.cues_changed.connect(self._cues_edited)
+        self.sel_cue_pane.changed.connect(self._cue_style_edited)
         self.settings_pane.overrides_changed.connect(self._overrides_edited)
         self.settings_pane.document_changed.connect(self._doc_edited)
 
@@ -101,7 +117,7 @@ class MainWindow(QMainWindow):
         if restored:
             self._activate_session(self.state.active_index)
         if n_queue:
-            self.queue_dock.show()
+            self._show_queue()
             self.queue_pane.refresh()
             self.statusBar().showMessage(
                 f'Restored {n_queue} queued job(s) from last session — '
@@ -146,7 +162,7 @@ class MainWindow(QMainWindow):
         m_render.addSeparator()
         act(m_render, '&Start queue (render all)', self._start_queue,
             'Ctrl+R')
-        act(m_render, 'Show &queue', lambda: self.queue_dock.show())
+        act(m_render, 'Show &queue', lambda: self._show_queue())
         act(m_render, '&Pause queue', self.queue.pause_all)
         act(m_render, '&Resume queue', self.queue.resume_all)
 
@@ -161,6 +177,7 @@ class MainWindow(QMainWindow):
         if sess is None:
             self.cue_pane.set_document(None)
             self.settings_pane.set_document(None)
+            self.sel_cue_pane.set_cue(None, None)
             return
         self.cue_pane.set_document(sess.doc)
         self.settings_pane.set_document(sess.doc)
@@ -183,6 +200,21 @@ class MainWindow(QMainWindow):
         if sess is not None and row == self.state.active_index:
             self._push_preview_context(sess)
         self.sources_pane.refresh()
+
+    def _cue_selected_for_editor(self, cue):
+        sess = self.state.active
+        self.sel_cue_pane.set_cue(
+            sess.doc if sess else None, cue,
+            n_selected=max(1, len(self.cue_pane.selected_cues())))
+
+    def _cue_style_edited(self):
+        """Selected-cue pane edits: refresh just that row + preview."""
+        sess = self.state.active
+        if sess:
+            sess.dirty = True
+        if self.sel_cue_pane.cue is not None:
+            self.cue_pane.refresh_cue(self.sel_cue_pane.cue)
+        self.preview_pane.schedule_render()
 
     def _cues_edited(self):
         """Edits made inside the cue pane (its model is already current)."""
@@ -211,9 +243,36 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Rendering / queueing
     # ------------------------------------------------------------------ #
+    def _show_queue(self):
+        """Show the queue dock; when it's docked on a side, widen the
+        window so it doesn't crush the other panes (screen permitting)."""
+        was_hidden = self.queue_dock.isHidden()
+        self._show_queue()
+        if not was_hidden or self.queue_dock.isFloating():
+            return
+        area = self.dockWidgetArea(self.queue_dock)
+        if area not in (Qt.DockWidgetArea.LeftDockWidgetArea,
+                        Qt.DockWidgetArea.RightDockWidgetArea):
+            return
+        if self.isMaximized() or self.isFullScreen():
+            return
+        screen = self.screen()
+        if screen is None:
+            return
+        need = max(self.queue_pane.sizeHint().width(), 340)
+        avail = screen.availableGeometry()
+        grow = min(need, max(0, avail.width() -
+                             self.frameGeometry().width()))
+        if grow <= 20:
+            return
+        self.resize(self.width() + grow, self.height())
+        fg = self.frameGeometry()
+        if fg.right() > avail.right():          # keep fully on screen
+            self.move(self.x() - (fg.right() - avail.right()), self.y())
+
     def _start_queue(self):
         self.queue.start_all()
-        self.queue_dock.show()
+        self._show_queue()
         self.queue_pane.refresh()
 
     def _render_current(self):
@@ -225,13 +284,13 @@ class MainWindow(QMainWindow):
             return
         sess = self.state.sessions[row]
         self._enqueue(sess)
-        self.queue_dock.show()
+        self._show_queue()
         self.queue_pane.refresh()
 
     def _render_all(self):
         for sess in self.state.sessions:
             self._enqueue(sess)
-        self.queue_dock.show()
+        self._show_queue()
         self.queue_pane.refresh()
 
     def _enqueue(self, sess: DocumentSession):
@@ -273,7 +332,7 @@ class MainWindow(QMainWindow):
         from ..core.parsers import detect_language_from_filename
         lang = detect_language_from_filename(sup_path) or 'und'
         self.queue.add_external_sup(video_path, sup_path, lang=lang)
-        self.queue_dock.show()
+        self._show_queue()
         self.queue_pane.refresh()
 
     def _on_queue_changed(self):

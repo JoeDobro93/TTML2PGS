@@ -279,6 +279,8 @@ class OverrideEditor(QWidget):
         # the language tabs (SettingsPane wraps the whole tab widget), so
         # collapsing shrinks the pane like every other section.
         form = QFormLayout(self)
+        form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows)
         form.setContentsMargins(10, 4, 6, 6)
         form.setVerticalSpacing(4)
 
@@ -491,6 +493,8 @@ class LayoutOptionsEditor(QWidget):
         super().__init__()
         self.lo = lo
         form = QFormLayout(self)
+        form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows)
         form.setContentsMargins(18, 2, 4, 6)
         self.chk_vidims = QCheckBox('Canvas = video dimensions')
         self.chk_vidims.setToolTip(
@@ -575,6 +579,8 @@ class StyleEditor(QWidget):
         self.style: Optional[Style] = None
         self._loading = False
         form = QFormLayout(self)
+        form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows)
         form.setContentsMargins(4, 4, 4, 4)
 
         def add_row(label: str):
@@ -826,6 +832,8 @@ class RegionEditor(QWidget):
         self.region: Optional[Region] = None
         self._loading = False
         form = QFormLayout(self)
+        form.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows)
         self.e_x = DimEdit(Dim(50, '%'), ['%', 'px', 'vw', 'vh'])
         self.e_xe = QComboBox()
         self.e_xe.addItems(['left', 'right', 'center', 'point'])
@@ -958,6 +966,8 @@ class SettingsPane(QWidget):
 
         player = QWidget()
         fl = QFormLayout(player)
+        fl.setRowWrapPolicy(
+            QFormLayout.RowWrapPolicy.WrapLongRows)
         fl.setContentsMargins(18, 2, 4, 6)
         self.cmb_engine = QComboBox()
         self.cmb_engine.addItems([

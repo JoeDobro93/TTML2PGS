@@ -903,6 +903,42 @@ class TestPipelineAndQueue(unittest.TestCase):
         self.assertIn('wenquanyi', names,
                       'preferred font must head the generic resolution')
 
+    def test_parse_style_refs(self):
+        try:
+            from ttml2pgs.ui.widgets.cue_table import parse_style_refs
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        sids = sorted(doc.styles.keys())
+        self.assertGreaterEqual(len(sids), 2)
+        self.assertEqual(parse_style_refs(doc, f'{sids[0]} {sids[1]}'),
+                         [sids[0], sids[1]])
+        self.assertEqual(parse_style_refs(doc, 'default'), [])
+        self.assertEqual(parse_style_refs(doc, ''), [])
+        self.assertIsNone(parse_style_refs(doc, 'no_such_style'))
+
+    def test_body_level_styles_reach_cues(self):
+        """<body style=…> definitions cascade into every cue's refs."""
+        ttml = '''<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:tts="http://www.w3.org/ns/ttml#styling" xml:lang="en">
+ <head><styling>
+   <style xml:id="bodyStyle" tts:color="#00ff00"/>
+ </styling></head>
+ <body style="bodyStyle"><div>
+   <p begin="0s" end="2s">hello</p>
+ </div></body></tt>'''
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'b.ttml')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(ttml)
+            doc = load_subtitle(path)
+        cue = doc.cues[0]
+        self.assertIn('bodyStyle', cue.style_refs)
+        comp = doc.resolve_style([(cue.style_refs, cue.inline_style)],
+                                 doc.get_region(cue))
+        self.assertEqual(comp.color[:3], (0, 255, 0))
+
     def test_rename_style_cascades(self):
         doc = load_subtitle(sample('netflix_ja.ttml'))
         # find a style actually referenced by a cue

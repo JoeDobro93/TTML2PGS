@@ -127,6 +127,9 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
 * Pause / resume / cancel / retry / reorder at queue, group and job
   level; pausing checkpoints between cues and resumes without redoing
   finished cues.
+* The queue lives in a **left-side dock** by default (drag it to any
+  edge); opening it widens the window instead of crushing the panes,
+  screen space permitting.
 * Queue state persists to disk; after a crash, finished `.sup`s are
   detected and only missing work re-runs.
 
@@ -137,7 +140,13 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   persist until you close the app; restore-on-launch included.
 * **Cue pane** — filter by text/region, edit times/region/text inline,
   add/duplicate/delete cues, enable checkboxes, and Time tools (shift
-  all/selected/after; manual fps conform with explained presets).
+  all/selected/after; manual fps conform with explained presets). A
+  **Style column** shows each cue's named styles (italic *default* =
+  defers to Initials, ✎ = has inline overrides) and is editable —
+  region/style edits on a multi-selection apply to every selected cue.
+  The collapsible **Selected cue** pane beneath reveals the current
+  cue's full style chain (including TTML `<body>`/`<div>`-inherited
+  refs) and edits its inline `<p>` style live.
 * **Preview** — an **embedded video player** (SubtitleEdit-style):
   plays the bound video with live subtitle overlays kept in sync —
   overlapping cues included, rendered by the same engine that feeds the
