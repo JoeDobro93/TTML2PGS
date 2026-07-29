@@ -84,25 +84,45 @@ _LANG_MARKERS: Dict[str, List[str]] = {
 #: default family preference per language, used for generic families and
 #: appended as fallback after author-requested families.
 _LANG_DEFAULT_STACKS: Dict[str, List[str]] = {
-    # v1's Chrome stack order, with 'Yu Gothic Medium' ahead of the plain
-    # family: Chromium renders Japanese with the Medium weight on Windows
-    # (Yu Gothic Regular is famously thin) — matching that keeps v2's
-    # default look as solid as the old HTML renderer.
-    'ja': ['Noto Sans CJK JP', 'Noto Sans JP', 'Hiragino Sans',
-           'Hiragino Kaku Gothic ProN', 'Yu Gothic Medium', 'Yu Gothic',
+    # CJK stacks list MEDIUM-named families FIRST: 400-weight CJK faces
+    # are print designs that render anemic as subtitles, and the medium
+    # preference must win across families (a machine with only Noto
+    # Regular + Yu Gothic Medium installed should use the latter — this
+    # matches Chromium's Yu Gothic Medium default on Windows). For bold
+    # requests the mediums are moved behind the base families so true
+    # Bold faces win (see _stack_for).
+    'ja': ['Noto Sans CJK JP Medium', 'Noto Sans JP Medium',
+           'Source Han Sans JP Medium', 'Yu Gothic Medium',
+           'Noto Sans CJK JP', 'Noto Sans JP', 'Hiragino Sans',
+           'Hiragino Kaku Gothic ProN', 'Yu Gothic',
            'Meiryo', 'Source Han Sans JP', 'MS PGothic', 'IPAPGothic',
            'Unifont-JP', 'Unifont JP'],
-    'zh-hans': ['PingFang SC', 'Noto Sans CJK SC', 'Noto Sans SC',
+    'zh-hans': ['Noto Sans CJK SC Medium', 'Noto Sans SC Medium',
+                'Source Han Sans SC Medium',
+                'PingFang SC', 'Noto Sans CJK SC', 'Noto Sans SC',
                 'Source Han Sans SC', 'Microsoft YaHei', 'SimHei',
                 'WenQuanYi Zen Hei', 'WenQuanYi Micro Hei'],
-    'zh-hant': ['PingFang TC', 'Noto Sans CJK TC', 'Noto Sans TC',
+    'zh-hant': ['Noto Sans CJK TC Medium', 'Noto Sans TC Medium',
+                'PingFang TC', 'Noto Sans CJK TC', 'Noto Sans TC',
                 'Source Han Sans TW', 'Microsoft JhengHei', 'PMingLiU',
                 'WenQuanYi Zen Hei'],
-    'ko': ['Apple SD Gothic Neo', 'Noto Sans CJK KR', 'Noto Sans KR',
+    'ko': ['Noto Sans CJK KR Medium', 'Noto Sans KR Medium',
+           'Apple SD Gothic Neo', 'Noto Sans CJK KR', 'Noto Sans KR',
            'Source Han Sans KR', 'Malgun Gothic', 'NanumGothic'],
     '': ['Arial', 'Helvetica', 'Liberation Sans', 'DejaVu Sans',
          'Noto Sans', 'Roboto', 'Segoe UI'],
 }
+
+
+def _stack_for(lk: str, w: int) -> List[str]:
+    """Language stack ordered for the requested weight: medium-named
+    families lead for normal text, trail for bold (true Bolds win)."""
+    names = _LANG_DEFAULT_STACKS.get(lk, [])
+    if w >= 600:
+        med = [n for n in names if n.lower().endswith('medium')]
+        rest = [n for n in names if not n.lower().endswith('medium')]
+        return rest + med
+    return names
 
 #: last-resort pan-unicode fallbacks
 _UNIVERSAL_FALLBACKS = ['DejaVu Sans', 'Arial Unicode MS', 'Unifont',
@@ -401,8 +421,7 @@ class FontManager:
             if fl in _GENERIC or fl == 'japanese':
                 # generic → user default, then language stack (CJK aware)
                 add_preferred()
-                for name in _LANG_DEFAULT_STACKS.get(lk, []) + \
-                        _LANG_DEFAULT_STACKS['']:
+                for name in _stack_for(lk, w) + _LANG_DEFAULT_STACKS['']:
                     add(self._lookup_family(name, w, italic))
                 if lk:
                     add(self._lang_classified(lk, w, italic))
@@ -412,7 +431,7 @@ class FontManager:
         # language fallback after the explicit list
         add_preferred()
         if lk:
-            for name in _LANG_DEFAULT_STACKS.get(lk, []):
+            for name in _stack_for(lk, w):
                 add(self._lookup_family(name, w, italic))
             add(self._lang_classified(lk, w, italic))
         for name in _LANG_DEFAULT_STACKS['']:

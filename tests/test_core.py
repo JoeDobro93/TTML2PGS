@@ -1039,6 +1039,38 @@ class TestPipelineAndQueue(unittest.TestCase):
         bold = fm.resolve_stack(['Yu Gothic'], lang='ja', weight='bold')
         self.assertEqual(bold[0].weight, 700)
 
+    def test_cjk_medium_wins_across_families(self):
+        """The common Windows setup: Noto JP Regular installed (heads the
+        old stack) + Yu Gothic Medium — generic ja text must use the
+        Medium face, not Noto Regular; bold must use the true Bold."""
+        from ttml2pgs.core.fonts import FaceRecord, FontManager, _norm_family
+        fm = FontManager()
+        recs = [
+            FaceRecord(path='/fake/noto-r.otf', index=0,
+                       families=['Noto Sans JP'], weight=400),
+            FaceRecord(path='/fake/yu-m.ttc', index=0,
+                       families=['Yu Gothic', 'Yu Gothic Medium'],
+                       weight=500),
+            FaceRecord(path='/fake/yu-b.ttc', index=0,
+                       families=['Yu Gothic', 'Yu Gothic Bold'],
+                       weight=700),
+        ]
+        fm.records = recs
+        for r in recs:
+            for fam in r.families:
+                fm.by_family.setdefault(_norm_family(fam), []).append(r)
+        normal = fm.resolve_stack(['sans-serif'], lang='ja')
+        self.assertEqual(normal[0].weight, 500,
+                         'Medium must lead the ja stack across families')
+        # bold: family order still wins (CSS semantics — synth bold on a
+        # regular-only family), but Medium families move BEHIND the base
+        # families and within a family the true Bold outranks Medium
+        bold = fm.resolve_stack(['sans-serif'], lang='ja', weight='bold')
+        self.assertEqual(bold[0].weight, 400)        # Noto + synth bold
+        first_yu = next(r for r in bold
+                        if 'Yu Gothic' in r.families)
+        self.assertEqual(first_yu.weight, 700)
+
     def test_vertical_dash_rotates_without_vert_alt(self):
         """A ー/— style bar in vertical flow must not lie horizontally
         across the column when the font has no vert alternate."""
