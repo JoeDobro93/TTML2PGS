@@ -20,14 +20,53 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QCheckBox, QColorDialog, QComboBox,
                              QCompleter, QDoubleSpinBox, QFormLayout,
                              QGroupBox, QHBoxLayout, QInputDialog, QLabel,
-                             QLineEdit, QListWidget, QPushButton,
-                             QScrollArea, QSizePolicy, QSplitter,
-                             QTabWidget, QToolButton, QVBoxLayout, QWidget)
+                             QLineEdit, QListWidget, QListWidgetItem,
+                             QPushButton, QScrollArea, QSizePolicy,
+                             QSplitter, QStyledItemDelegate, QTabWidget,
+                             QToolButton, QVBoxLayout, QWidget)
 
 from ...core.colors import parse_color, to_hex
-from ...core.model import Region, Shadow, Style, SubtitleDocument
+from ...core.model import (Region, Shadow, Style, SubtitleDocument,
+                           style_hints)
 from ...core.overrides import LayoutOptions, OverrideSet, StyleOverrides
 from ...core.units import Dim
+
+
+class HintItemDelegate(QStyledItemDelegate):
+    """List items as 'name  hint…' with the hint in grey italics."""
+
+    def paint(self, painter, option, index):
+        from PyQt6.QtWidgets import (QApplication, QStyle,
+                                     QStyleOptionViewItem)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        name = index.data(Qt.ItemDataRole.DisplayRole) or ''
+        hint = index.data(Qt.ItemDataRole.UserRole) or ''
+        opt.text = ''
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt,
+                          painter, opt.widget)
+        painter.save()
+        rect = opt.rect.adjusted(6, 0, -4, 0)
+        painter.setFont(opt.font)
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        painter.setPen(opt.palette.highlightedText().color() if selected
+                       else opt.palette.text().color())
+        painter.drawText(rect, Qt.AlignmentFlag.AlignVCenter, name)
+        if hint:
+            from PyQt6.QtGui import QFont, QFontMetrics
+            fm = QFontMetrics(opt.font)
+            used = fm.horizontalAdvance(name + '  ')
+            f = QFont(opt.font)
+            f.setItalic(True)
+            f.setPointSizeF(max(6.0, f.pointSizeF() - 1))
+            painter.setFont(f)
+            painter.setPen(QColor(150, 150, 150))
+            sub = rect.adjusted(used, 0, 0, 0)
+            elided = QFontMetrics(f).elidedText(
+                hint, Qt.TextElideMode.ElideRight, max(10, sub.width()))
+            painter.drawText(sub, Qt.AlignmentFlag.AlignVCenter, elided)
+        painter.restore()
 
 
 # --------------------------------------------------------------------------- #
@@ -1012,6 +1051,7 @@ class SettingsPane(QWidget):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(2, 2, 2, 2)
         self.style_list = QListWidget()
+        self.style_list.setItemDelegate(HintItemDelegate(self.style_list))
         ll.addWidget(self.style_list)
         rowb = QHBoxLayout()
         b_add = QPushButton('Add')
@@ -1034,6 +1074,7 @@ class SettingsPane(QWidget):
         b_del.clicked.connect(self._del_style)
         self.style_list.currentTextChanged.connect(self._style_selected)
         self.style_editor.changed.connect(self.document_changed.emit)
+        self.style_editor.changed.connect(self.refresh_style_hints)
 
         # ---- regions tab --------------------------------------------- #
         rg_tab = QSplitter(Qt.Orientation.Horizontal)
@@ -1089,6 +1130,9 @@ class SettingsPane(QWidget):
 
     # -- language tabs -------------------------------------------------- #
     def _rebuild_lang_tabs(self):
+        # never steal the user's place: restore whichever tab was active
+        current = self.lang_tabs.tabText(self.lang_tabs.currentIndex()) \
+            if self.lang_tabs.count() else 'Default'
         self.lang_tabs.blockSignals(True)
         while self.lang_tabs.count():
             self.lang_tabs.removeTab(0)
@@ -1106,6 +1150,10 @@ class SettingsPane(QWidget):
         for i in range(self.lang_tabs.count()):
             if self.lang_tabs.tabText(i) == 'Default':
                 bar.setTabButton(i, bar.ButtonPosition.RightSide, None)
+        for i in range(self.lang_tabs.count()):
+            if self.lang_tabs.tabText(i) == current:
+                self.lang_tabs.setCurrentIndex(i)
+                break
         self.lang_tabs.blockSignals(False)
 
     def ensure_language_tab(self, lang: str):
@@ -1135,12 +1183,28 @@ class SettingsPane(QWidget):
         self.overrides_changed.emit()
 
     # -- document binding ----------------------------------------------- #
+    def _style_item(self, sid: str) -> QListWidgetItem:
+        it = QListWidgetItem(sid)
+        if self.doc and sid in self.doc.styles:
+            it.setData(Qt.ItemDataRole.UserRole,
+                       style_hints(self.doc.styles[sid]))
+        return it
+
+    def refresh_style_hints(self):
+        for i in range(self.style_list.count()):
+            it = self.style_list.item(i)
+            sid = it.text()
+            if self.doc and sid in self.doc.styles:
+                it.setData(Qt.ItemDataRole.UserRole,
+                           style_hints(self.doc.styles[sid]))
+
     def set_document(self, doc: Optional[SubtitleDocument]):
         self.doc = doc
         self.style_list.clear()
         self.region_list.clear()
         if doc:
-            self.style_list.addItems(sorted(doc.styles.keys()))
+            for sid in sorted(doc.styles.keys()):
+                self.style_list.addItem(self._style_item(sid))
             self.region_list.addItems(list(doc.regions.keys()))
             self.initial_editor.load(doc.initial)
             self.ensure_language_tab(doc.language)
@@ -1169,7 +1233,7 @@ class SettingsPane(QWidget):
             return
         sid = self.doc.unique_style_id(name.strip())
         self.doc.styles[sid] = Style(id=sid)
-        self.style_list.addItem(sid)
+        self.style_list.addItem(self._style_item(sid))
         self.style_list.setCurrentRow(self.style_list.count() - 1)
         self.document_changed.emit()
 

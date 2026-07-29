@@ -1015,6 +1015,81 @@ class TestPipelineAndQueue(unittest.TestCase):
         rebuilt.root = tree2
         self.assertEqual(rebuilt.plain_text(), 'x⟦y⟧z')
 
+    def test_style_hints(self):
+        from ttml2pgs.core.model import Style, style_hints
+        from ttml2pgs.core.units import Dim
+        st = Style(color=(255, 0, 0, 255), text_align='center',
+                   display_align='after', shear=15.0,
+                   font_size=Dim(5, 'vh'))
+        h = style_hints(st)
+        self.assertEqual(h.count('align'), 1)      # grouped
+        self.assertIn('italics', h)                # shear counts
+        self.assertIn('color', h)
+        self.assertIn('size', h)
+        self.assertEqual(style_hints(Style()), '')
+        self.assertIn('bold', style_hints(Style(font_weight='bold')))
+        self.assertIn('vertical', style_hints(Style(writing_mode='tbrl')))
+
+    def test_used_styles_spans(self):
+        try:
+            from ttml2pgs.ui.widgets.cue_table import used_styles
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        from ttml2pgs.core.model import Cue, SpanNode
+        cue = Cue(begin_ms=0, end_ms=1000)
+        cue.style_refs = ['Style0']
+        sp = SpanNode(kind='span')
+        sp.style_refs = ['Style2']
+        sp.children.append(SpanNode.text_node('inner'))
+        cue.root.children.append(SpanNode.text_node('outer '))
+        cue.root.children.append(sp)
+        self.assertEqual(used_styles(cue), {'Style0', 'Style2'})
+
+    def test_token_edit_offscreen(self):
+        """Chip editor: load/serialize round-trip, wrap, partner-delete."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        _app = QApplication.instance() or QApplication([])
+        from ttml2pgs.ui.widgets.cue_editor import CueMarkup, TokenStyleEdit
+        doc = load_subtitle(sample('styled.vtt'))
+        cue = next(c for c in doc.cues
+                   if CueMarkup.from_cue(doc, c).text.count('⟦') >= 1)
+        mk = CueMarkup.from_cue(doc, cue)
+        ed = TokenStyleEdit()
+        committed = []
+        ed.committed.connect(committed.append)
+        ed.load(mk)
+        self.assertEqual(ed._serialize(), mk.text,
+                         'document/chip round-trip broke the markup')
+
+        # wrap the whole content in another existing style
+        sid = sorted(doc.styles.keys())[0]
+        c = ed.textCursor()
+        c.select(c.SelectionType.Document)
+        ed.setTextCursor(c)
+        ed.wrap_selection(sid)
+        after = ed._serialize()
+        self.assertTrue(after.startswith('⟦' + sid))
+        self.assertTrue(after.endswith(sid + '⟧'))
+        self.assertTrue(committed, 'wrap must commit a rebuilt tree')
+
+        # deleting a chip removes its partner but keeps the text
+        tok = ed._doc_tokens[0]
+        sel = ed.textCursor()
+        sel.setPosition(tok[0])
+        sel.setPosition(tok[0] + 1, sel.MoveMode.KeepAnchor)
+        ed.setTextCursor(sel)
+        n_before = len(ed._doc_tokens)
+        ed._delete_smart(forward=True)
+        self.assertEqual(len(ed._doc_tokens), n_before - 2,
+                         'partner chip must go too')
+        tree, reason = mk.to_tree(ed._serialize())
+        self.assertIsNotNone(tree, reason)
+
     def test_parse_style_refs(self):
         try:
             from ttml2pgs.ui.widgets.cue_table import parse_style_refs

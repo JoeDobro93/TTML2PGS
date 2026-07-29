@@ -26,6 +26,21 @@ COL_ON, COL_NUM, COL_START, COL_END, COL_DUR, COL_REGION, COL_STYLE, \
     COL_TEXT = range(8)
 
 
+def used_styles(cue: Cue) -> set:
+    """Every named style the cue touches: cue-level refs plus refs on any
+    span in its content tree."""
+    out = set(cue.style_refs)
+
+    def walk(node: SpanNode):
+        for ch in node.children:
+            if ch.kind == 'span':
+                out.update(ch.style_refs)
+                walk(ch)
+
+    walk(cue.root)
+    return out
+
+
 def parse_style_refs(doc: SubtitleDocument, text: str):
     """'s1 s2' → ['s1','s2'] if every id exists; ''/'default' → [];
     None when an unknown id is mentioned."""
@@ -119,10 +134,14 @@ class CueModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()):
         return len(self.HEADERS)
 
+    #: columns with an active value filter (drawn with a funnel marker)
+    filtered_cols: set = set()
+
     def headerData(self, sec, orient, role):
         if role == Qt.ItemDataRole.DisplayRole and \
                 orient == Qt.Orientation.Horizontal:
-            return self.HEADERS[sec]
+            base = self.HEADERS[sec]
+            return f'{base} ⏷' if sec in self.filtered_cols else base
         return None
 
     def flags(self, index):
@@ -322,11 +341,19 @@ class CueFilterProxy(QSortFilterProxyModel):
     def __init__(self):
         super().__init__()
         self.text = ''
-        self.region = ''
+        self.region_value: Optional[str] = None    # '(default)' | region id
+        self.style_value: Optional[str] = None     # 'default' | style id
 
-    def set_filters(self, text: str, region: str):
+    def set_text(self, text: str):
         self.text = text.lower()
-        self.region = region
+        self.invalidateFilter()
+
+    def set_region_value(self, value: Optional[str]):
+        self.region_value = value
+        self.invalidateFilter()
+
+    def set_style_value(self, value: Optional[str]):
+        self.style_value = value
         self.invalidateFilter()
 
     def filterAcceptsRow(self, row, parent):
@@ -334,9 +361,18 @@ class CueFilterProxy(QSortFilterProxyModel):
         cue = model.cue_at(row)
         if cue is None:
             return False
-        if self.region and self.region != 'All regions':
+        if self.region_value is not None:
             rid = cue.region_id or '(default)'
-            if rid != self.region:
+            if rid != self.region_value:
+                return False
+        if self.style_value is not None:
+            # matches styles used ANYWHERE in the cue (cue level or any
+            # span inside the line)
+            used = used_styles(cue)
+            if self.style_value == 'default':
+                if used:
+                    return False
+            elif self.style_value not in used:
                 return False
         # match against the preview text so "(" finds ruby cues
         if self.text and self.text not in model.preview(cue).lower():
@@ -360,17 +396,17 @@ class CuePane(QWidget):
 
         bar = QHBoxLayout()
         self.txt_filter = QLineEdit()
-        self.txt_filter.setPlaceholderText('Filter text…')
+        self.txt_filter.setPlaceholderText(
+            'Filter text… (click the Region/Style column headers to '
+            'filter by value)')
         self.txt_filter.setClearButtonEnabled(True)
-        self.cmb_region = QComboBox()
-        self.cmb_region.addItem('All regions')
         self.btn_add = QPushButton('+ Cue')
         self.btn_del = QPushButton('Delete')
         self.btn_dup = QPushButton('Duplicate')
         self.btn_time = QPushButton('Time tools…')
         self.btn_check = QPushButton('Check all')
         self.btn_uncheck = QPushButton('Uncheck all')
-        for w in (self.txt_filter, self.cmb_region, self.btn_add,
+        for w in (self.txt_filter, self.btn_add,
                   self.btn_dup, self.btn_del, self.btn_time,
                   self.btn_check, self.btn_uncheck):
             bar.addWidget(w)
@@ -402,8 +438,13 @@ class CuePane(QWidget):
         lay.addWidget(self.table)
 
         # connections
-        self.txt_filter.textChanged.connect(self._filters_changed)
-        self.cmb_region.currentTextChanged.connect(self._filters_changed)
+        self.txt_filter.textChanged.connect(
+            lambda t: self.proxy.set_text(t))
+        hh.setSectionsClickable(True)
+        hh.sectionClicked.connect(self._header_clicked)
+        hh.setToolTip('Click the Region or Style header to filter by '
+                      'value. Style filtering matches styles used '
+                      'anywhere in the cue, including inside the line.')
         self.btn_add.clicked.connect(self.add_cue)
         self.btn_del.clicked.connect(self.delete_selected)
         self.btn_dup.clicked.connect(self.duplicate_selected)
@@ -416,13 +457,8 @@ class CuePane(QWidget):
     def set_document(self, doc: Optional[SubtitleDocument]):
         self.doc = doc
         self.model.set_document(doc)
-        self.cmb_region.blockSignals(True)
-        self.cmb_region.clear()
-        self.cmb_region.addItem('All regions')
-        if doc:
-            self.cmb_region.addItem('(default)')
-            self.cmb_region.addItems(list(doc.regions.keys()))
-        self.cmb_region.blockSignals(False)
+        self._set_col_filter(COL_REGION, None)
+        self._set_col_filter(COL_STYLE, None)
         sel = self.table.selectionModel()
         if sel:
             try:
@@ -440,24 +476,70 @@ class CuePane(QWidget):
         self.model.refresh_cue(cue)
 
     def refresh_regions(self):
-        """Rebuild the region filter after regions were added/renamed/
-        removed in the settings pane (the in-table editor reads the doc
-        live, so only this combo needs refreshing)."""
-        current = self.cmb_region.currentText()
-        self.cmb_region.blockSignals(True)
-        self.cmb_region.clear()
-        self.cmb_region.addItem('All regions')
-        if self.doc:
-            self.cmb_region.addItem('(default)')
-            self.cmb_region.addItems(list(self.doc.regions.keys()))
-        idx = self.cmb_region.findText(current)
-        self.cmb_region.setCurrentIndex(idx if idx >= 0 else 0)
-        self.cmb_region.blockSignals(False)
-        self._filters_changed()
+        """After regions/styles change in the settings pane, drop filters
+        that reference ids that no longer exist (the header menus and the
+        in-table editors read the doc live)."""
+        if self.doc is None:
+            return
+        rv = self.proxy.region_value
+        if rv is not None and rv != '(default)' and \
+                rv not in self.doc.regions:
+            self._set_col_filter(COL_REGION, None)
+        sv = self.proxy.style_value
+        if sv is not None and sv != 'default' and \
+                sv not in self.doc.styles:
+            self._set_col_filter(COL_STYLE, None)
 
-    def _filters_changed(self):
-        self.proxy.set_filters(self.txt_filter.text(),
-                               self.cmb_region.currentText())
+    def _set_col_filter(self, col: int, value: Optional[str]):
+        if col == COL_REGION:
+            self.proxy.set_region_value(value)
+        else:
+            self.proxy.set_style_value(value)
+        cols = set(self.model.filtered_cols)
+        if value is None:
+            cols.discard(col)
+        else:
+            cols.add(col)
+        self.model.filtered_cols = cols
+        self.model.headerDataChanged.emit(Qt.Orientation.Horizontal,
+                                          col, col)
+
+    def _header_clicked(self, section: int):
+        if self.doc is None or section not in (COL_REGION, COL_STYLE):
+            return
+        menu = QMenu(self)
+        if section == COL_REGION:
+            current = self.proxy.region_value
+            values = ['(default)'] + list(self.doc.regions.keys())
+            title = 'Filter by region'
+        else:
+            current = self.proxy.style_value
+            values = ['default'] + sorted(self.doc.styles.keys())
+            title = 'Filter by style (matches styles used anywhere in '\
+                    'the cue)'
+        t = menu.addAction(title)
+        t.setEnabled(False)
+        menu.addSeparator()
+        a_any = menu.addAction('(no filter)')
+        a_any.setCheckable(True)
+        a_any.setChecked(current is None)
+        acts = {}
+        for v in values:
+            a = menu.addAction(v)
+            a.setCheckable(True)
+            a.setChecked(current == v)
+            acts[a] = v
+        from PyQt6.QtCore import QPoint
+        hh = self.table.horizontalHeader()
+        pos = hh.mapToGlobal(QPoint(hh.sectionViewportPosition(section),
+                                    hh.height()))
+        chosen = menu.exec(pos)
+        if chosen is None:
+            return
+        if chosen is a_any:
+            self._set_col_filter(section, None)
+        elif chosen in acts:
+            self._set_col_filter(section, acts[chosen])
 
     def _on_selection(self, *_):
         self.cue_selected.emit(self.current_cue())

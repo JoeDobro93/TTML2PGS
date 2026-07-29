@@ -320,6 +320,58 @@ class Region:
         return copy.deepcopy(self)
 
 
+#: (attribute, group hint) — grouped so e.g. all three align fields yield
+#: one "align" hint. Order = display order.
+_HINT_GROUPS = [
+    (('font_family',), 'font'),
+    (('font_size',), 'size'),
+    (('font_weight',), 'bold'),
+    (('font_style', 'shear'), 'italics'),
+    (('color',), 'color'),
+    (('background_color',), 'background'),
+    (('opacity', 'opacity_mult'), 'opacity'),
+    (('text_align', 'multi_row_align', 'display_align'), 'align'),
+    (('line_height', 'letter_spacing'), 'spacing'),
+    (('writing_mode',), 'vertical'),
+    (('text_orientation',), 'orientation'),
+    (('outline_color', 'outline_width'), 'outline'),
+    (('shadows',), 'shadow'),
+    (('text_decoration',), 'underline'),
+    (('ruby', 'ruby_align', 'ruby_position', 'ruby_scale'), 'ruby'),
+    (('text_combine',), 'tcy'),
+    (('text_emphasis_style', 'text_emphasis_color',
+      'text_emphasis_position'), 'emphasis'),
+    (('visibility', 'display'), 'visibility'),
+    (('padding',), 'padding'),
+    (('origin', 'extent', 'position', 'show_background'), 'region'),
+    (('wrap',), 'wrap'),
+]
+
+
+def style_hints(style: Style) -> str:
+    """Short '; '-separated summary of what a style sets — one hint per
+    logical group ('align' for any/all alignment fields, 'italics' for
+    font-style/shear, …). Empty string for an all-inherit style."""
+    hints = []
+    for attrs, label in _HINT_GROUPS:
+        for a in attrs:
+            v = getattr(style, a, None)
+            if v is None:
+                continue
+            if a == 'font_weight':
+                label = 'bold' if v == 'bold' else 'weight'
+            elif a == 'writing_mode':
+                label = 'vertical' if str(v).startswith('tb') else 'writing'
+            elif a == 'text_decoration':
+                label = {'underline': 'underline',
+                         'lineThrough': 'strike'}.get(v, 'decoration')
+            hints.append(label)
+            break
+    if style.parent_ids:
+        hints.append('chains: ' + ' '.join(style.parent_ids))
+    return '; '.join(hints)
+
+
 def default_region() -> Region:
     """Bottom-centered 90%-wide region used when a format defines none."""
     r = Region(id='__default__',

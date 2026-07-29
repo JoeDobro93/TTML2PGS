@@ -28,8 +28,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QTextCharFormat, QTextCursor
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QTextCharFormat,
+                         QTextCursor, QTextFormat, QTextObjectInterface)
 from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu,
                              QPushButton, QTextEdit, QToolButton,
                              QVBoxLayout, QWidget)
@@ -321,8 +322,73 @@ def _chip_color(sid: str) -> QColor:
     return QColor(int(r * 255), int(g * 255), int(b * 255))
 
 
+#: custom text-object type hosting one style chip per character
+TOKEN_OBJECT_TYPE = int(QTextFormat.ObjectTypes.UserObject) + 1
+PROP_LITERAL = int(QTextFormat.Property.UserProperty) + 1
+_OBJ = '￼'
+
+
+def _literal_meta(lit: str) -> Tuple[str, str, str]:
+    """literal -> (kind 'open'|'close'|'atom', sid, chip label)."""
+    if lit.startswith(OPEN + '≡'):
+        body = lit[1:-1]                       # ≡N preview
+        sid = body.split(' ', 1)[0]
+        prev = body.split(' ', 1)[1] if ' ' in body else ''
+        return 'atom', sid, prev or sid
+    if lit.startswith(OPEN):
+        sid = lit[1:]
+        return 'open', sid, f'{sid} ▸'
+    sid = lit[:-1]
+    return 'close', sid, f'◂ {sid}'
+
+
+class _ChipHandler(QObject, QTextObjectInterface):
+    """Paints ⟦style⟧ tokens as rounded, labeled boxes."""
+
+    def __init__(self, edit: 'TokenStyleEdit'):
+        super().__init__(edit)
+        self.edit = edit
+
+    def _font(self) -> QFont:
+        f = QFont(self.edit.font())
+        f.setPointSizeF(max(7.0, f.pointSizeF() - 1))
+        f.setBold(True)
+        return f
+
+    def intrinsicSize(self, doc, pos, fmt):
+        from PyQt6.QtCore import QSizeF
+        lit = fmt.property(PROP_LITERAL) or ''
+        _k, _sid, label = _literal_meta(lit)
+        fm = QFontMetricsF(self._font())
+        return QSizeF(fm.horizontalAdvance(label) + 12, fm.height() + 4)
+
+    def drawObject(self, painter, rect, doc, pos, fmt):
+        lit = fmt.property(PROP_LITERAL) or ''
+        kind, sid, label = _literal_meta(lit)
+        color = _chip_color(sid)
+        painter.save()
+        painter.setRenderHint(painter.RenderHint.Antialiasing, True)
+        r = rect.adjusted(1, 1, -1, -1)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        painter.drawRoundedRect(r, 5, 5)
+        painter.setPen(QColor(245, 245, 245))
+        painter.setFont(self._font())
+        painter.drawText(r, Qt.AlignmentFlag.AlignCenter, label)
+        painter.restore()
+
+
 class TokenStyleEdit(QTextEdit):
-    """QTextEdit hosting the token markup with validation-revert."""
+    """Cue text editor where style spans appear as draggable chip boxes.
+
+    Each chip is ONE embedded character (a custom text object), so it's
+    atomic by construction: the caret can't enter it, selections take it
+    whole, and Qt's undo restores it intact. Click a chip to select it,
+    drag it to move where the styling starts/ends. Deleting a chip also
+    removes its partner (keeping the text); edits producing an invalid
+    structure (end before start, style nested in itself) revert with the
+    reason reported.
+    """
 
     committed = pyqtSignal(object)          # rebuilt SpanNode root
     rejected = pyqtSignal(str)              # reason an edit was reverted
@@ -332,60 +398,163 @@ class TokenStyleEdit(QTextEdit):
         self.setAcceptRichText(False)
         self.setFixedHeight(96)
         self.setToolTip(
-            'The cue text with visible style tokens (⟦style … style⟧). '
-            'Drag tokens to move where styling starts/ends; overlaps '
-            'auto-normalize. Deleting a token also removes its partner '
-            '(text is kept). Invalid edits revert.')
+            'The cue text with its style spans shown as chips '
+            '(name ▸ … ◂ name). Click a chip to select it, drag to move '
+            'it; overlaps auto-normalize. Deleting a chip removes its '
+            'partner too (text is kept). Invalid arrangements revert.')
         self.markup: Optional[CueMarkup] = None
-        self._tokens: List[tuple] = []
+        self._doc_tokens: List[tuple] = []   # (pos, literal, kind, sid)
         self._loading = False
         self._reverting = False
-        self._last_good = ''
+        self._suspend = False
+        self._press_chip: Optional[int] = None
+        self._press_pos = None
+        self._handler = _ChipHandler(self)
+        self.document().documentLayout().registerHandler(
+            TOKEN_OBJECT_TYPE, self._handler)
         self.textChanged.connect(self._changed)
-        self.cursorPositionChanged.connect(self._snap_cursor)
+
+    # ------------------------------------------------------------------ #
+    # document <-> markup text
+    # ------------------------------------------------------------------ #
+    def _chip_format(self, literal: str) -> QTextCharFormat:
+        f = QTextCharFormat()
+        f.setObjectType(TOKEN_OBJECT_TYPE)
+        f.setProperty(PROP_LITERAL, literal)
+        return f
+
+    def _insert_markup(self, cursor: QTextCursor, text: str):
+        """Insert markup text, materializing token literals as chips."""
+        if self.markup is None:
+            cursor.insertText(_esc_text(text))
+            return
+        parsed, _ = self.markup.parse(text)
+        if parsed is None:
+            # not balanced here — still materialize literal-by-literal
+            pos = 0
+            tokens = self._scan_literals(text)
+            for s, e, lit in tokens:
+                if s > pos:
+                    cursor.insertText(_esc_text(text[pos:s]))
+                cursor.insertText(_OBJ, self._chip_format(lit))
+                cursor.setCharFormat(QTextCharFormat())
+                pos = e
+            cursor.insertText(_esc_text(text[pos:]))
+            return
+        _items, tokens = parsed
+        pos = 0
+        for s, e, sid, kind in tokens:
+            if s > pos:
+                cursor.insertText(text[pos:s])
+            cursor.insertText(_OBJ, self._chip_format(text[s:e]))
+            cursor.setCharFormat(QTextCharFormat())
+            pos = e
+        cursor.insertText(text[pos:])
+
+    def _scan_literals(self, text: str) -> List[tuple]:
+        """Best-effort token literal scan (no balance check) for pastes."""
+        if self.markup is None:
+            return []
+        out = []
+        ids = self.markup._token_ids()
+        atom_lits = [f'{OPEN}≡{i + 1} {_atom_preview(a, self.markup.doc)}'
+                     f'{CLOSE}' for i, a in enumerate(self.markup.atoms)]
+        pos, n = 0, len(text)
+        while pos < n:
+            hit = None
+            if text[pos] == OPEN:
+                for lit in atom_lits:
+                    if text.startswith(lit, pos):
+                        hit = lit
+                        break
+                if hit is None:
+                    for sid in ids:
+                        if text.startswith(OPEN + sid, pos):
+                            hit = OPEN + sid
+                            break
+            else:
+                for sid in ids:
+                    if text.startswith(sid + CLOSE, pos):
+                        hit = sid + CLOSE
+                        break
+            if hit:
+                out.append((pos, pos + len(hit), hit))
+                pos += len(hit)
+            else:
+                pos += 1
+        return out
+
+    def _serialize(self) -> str:
+        """Document → markup text; also rebuilds self._doc_tokens."""
+        doc = self.document()
+        parts: List[str] = []
+        self._doc_tokens = []
+        pos = 0
+        block = doc.begin()
+        first = True
+        while block.isValid():
+            if not first:
+                parts.append('\n')
+                pos += 1
+            first = False
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                fmt = frag.charFormat()
+                text = frag.text()
+                if fmt.objectType() == TOKEN_OBJECT_TYPE:
+                    lit = fmt.property(PROP_LITERAL) or ''
+                    kind, sid, _lab = _literal_meta(lit)
+                    for _ in range(len(text)):     # normally 1 char
+                        parts.append(lit)
+                        self._doc_tokens.append((pos, lit, kind, sid))
+                        pos += 1
+                else:
+                    clean = text.replace(_OBJ, '')
+                    parts.append(clean)
+                    pos += len(clean)
+                it += 1
+            block = block.next()
+        return ''.join(parts)
 
     # ------------------------------------------------------------------ #
     def load(self, markup: Optional[CueMarkup]):
         self._loading = True
         self.markup = markup
-        self.setPlainText(markup.text if markup else '')
+        self.clear()
+        if markup is not None:
+            cur = self.textCursor()
+            self._insert_markup(cur, markup.text)
         self.document().clearUndoRedoStacks()
         self.setEnabled(markup is not None)
-        self._last_good = markup.text if markup else ''
         self._loading = False
         self._revalidate(commit=False)
 
     # ------------------------------------------------------------------ #
-    def _token_at(self, pos: int) -> Optional[tuple]:
-        for t in self._tokens:
-            if t[0] < pos < t[1]:
+    # chips: hit test, partner, smart delete
+    # ------------------------------------------------------------------ #
+    def _chip_at(self, doc_pos: int) -> Optional[tuple]:
+        for t in self._doc_tokens:
+            if t[0] == doc_pos:
                 return t
         return None
 
-    def _token_span(self, a: int, b: int) -> Tuple[int, int]:
-        """Expand [a,b) so it never splits a token."""
-        for t in self._tokens:
-            if t[0] < a < t[1]:
-                a = t[0]
-            if t[0] < b < t[1]:
-                b = t[1]
-        return a, b
+    def _partner_pos(self, tok: tuple) -> Optional[int]:
+        pos, lit, kind, sid = tok
+        if kind == 'atom':
+            return None
+        if kind == 'open':
+            for t in self._doc_tokens:
+                if t[0] > pos and t[3] == sid and t[2] == 'close':
+                    return t[0]
+        else:
+            best = None
+            for t in self._doc_tokens:
+                if t[0] < pos and t[3] == sid and t[2] == 'open':
+                    best = t[0]
+            return best
+        return None
 
-    def _snap_cursor(self):
-        if self._loading or self._reverting:
-            return
-        c = self.textCursor()
-        if c.hasSelection():
-            return
-        t = self._token_at(c.position())
-        if t is not None:
-            c.setPosition(t[1] if (c.position() - t[0]) > (t[1] - t[0]) / 2
-                          else t[0])
-            self.blockSignals(True)
-            self.setTextCursor(c)
-            self.blockSignals(False)
-
-    # ------------------------------------------------------------------ #
     def keyPressEvent(self, ev):
         if ev.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
             if self._delete_smart(forward=ev.key() == Qt.Key.Key_Delete):
@@ -397,136 +566,221 @@ class TokenStyleEdit(QTextEdit):
         super().keyPressEvent(ev)
 
     def _delete_smart(self, forward: bool, insert: str = '') -> bool:
-        """Token-aware delete: expand partial tokens, remove partners of
-        fully-deleted tokens. Returns True when handled."""
         c = self.textCursor()
         if c.hasSelection():
             a, b = c.selectionStart(), c.selectionEnd()
         else:
             pos = c.position()
             a, b = (pos, pos + 1) if forward else (pos - 1, pos)
-            if a < 0 or b > len(self.toPlainText()):
+            if a < 0 or b > self.document().characterCount() - 1:
                 return True
-        a, b = self._token_span(a, b)
-        # partners of tokens fully inside [a,b) that live outside it
-        doomed = [t for t in self._tokens if a <= t[0] and t[1] <= b]
-        extra: List[Tuple[int, int]] = []
-        for t in doomed:
-            partner = self._partner(t)
-            if partner and not (a <= partner[0] and partner[1] <= b):
-                extra.append((partner[0], partner[1]))
+        # partners of chips inside [a,b) that live outside it
+        extra = []
+        for t in self._doc_tokens:
+            if a <= t[0] < b:
+                p = self._partner_pos(t)
+                if p is not None and not (a <= p < b):
+                    extra.append((p, p + 1))
         ranges = sorted(set(extra) | {(a, b)}, reverse=True)
+        self._suspend = True
         cur = self.textCursor()
         cur.beginEditBlock()
-        for x, y in ranges:
-            cur.setPosition(x)
-            cur.setPosition(y, QTextCursor.MoveMode.KeepAnchor)
-            cur.removeSelectedText()
-        if insert:
-            cur.insertText(insert)
-        cur.endEditBlock()
+        try:
+            for x, y in ranges:
+                cur.setPosition(x)
+                cur.setPosition(y, QTextCursor.MoveMode.KeepAnchor)
+                cur.removeSelectedText()
+            if insert:
+                cur.insertText(insert)
+        finally:
+            cur.endEditBlock()
+            self._suspend = False
+        self._revalidate(commit=True)
         return True
 
-    def _partner(self, tok: tuple) -> Optional[tuple]:
-        s, e, sid, kind = tok
-        if kind == 'atom':
-            return None
-        if kind == 'open':
-            for t in self._tokens:
-                if t[0] <= s or t[2] != sid:
-                    continue
-                if t[3] == 'close':
-                    return t
-        else:
-            best = None
-            for t in self._tokens:
-                if t[1] <= s and t[2] == sid and t[3] == 'open':
-                    best = t
-            return best
-        return None
+    # ------------------------------------------------------------------ #
+    # mouse: click selects a chip; dragging it moves it
+    # ------------------------------------------------------------------ #
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            pt = ev.position().toPoint()
+            cur = self.cursorForPosition(pt)
+            pos = cur.position()
+            # cursorForPosition gives the nearest boundary; the clicked
+            # character is at pos when the click is right of it, pos-1
+            # when left of it
+            target = pos if pt.x() >= self.cursorRect(cur).x() else pos - 1
+            chip = self._chip_at(target)
+            if chip is not None:
+                sel = self.textCursor()
+                sel.setPosition(chip[0])
+                sel.setPosition(chip[0] + 1,
+                                QTextCursor.MoveMode.KeepAnchor)
+                self.setTextCursor(sel)
+                self._press_chip = chip[0]
+                self._press_pos = ev.position().toPoint()
+                ev.accept()
+                return
+        self._press_chip = None
+        super().mousePressEvent(ev)
 
-    def insertFromMimeData(self, source):
-        # drops land outside tokens
-        c = self.textCursor()
-        t = self._token_at(c.position())
-        if t is not None and not c.hasSelection():
-            c.setPosition(t[1])
-            self.setTextCursor(c)
-        super().insertFromMimeData(source)
+    def mouseMoveEvent(self, ev):
+        if self._press_chip is not None and \
+                (ev.buttons() & Qt.MouseButton.LeftButton):
+            from PyQt6.QtWidgets import QApplication
+            if (ev.position().toPoint() - self._press_pos
+                    ).manhattanLength() >= QApplication.startDragDistance():
+                self._drag_chip()
+                return
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self._press_chip = None
+        super().mouseReleaseEvent(ev)
+
+    def _drag_chip(self):
+        from PyQt6.QtCore import QMimeData
+        from PyQt6.QtGui import QDrag
+        src = self.textCursor()
+        if not src.hasSelection():
+            return
+        self._press_chip = None
+        mime = self.createMimeDataFromSelection()
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        # keep positions honest: src cursor auto-adjusts through edits
+        self._suspend = True
+        try:
+            result = drag.exec(Qt.DropAction.MoveAction |
+                               Qt.DropAction.CopyAction,
+                               Qt.DropAction.MoveAction)
+            if result == Qt.DropAction.MoveAction and \
+                    self._drop_happened_here:
+                src.removeSelectedText()
+        finally:
+            self._drop_happened_here = False
+            self._suspend = False
+        self._revalidate(commit=True)
+
+    _drop_happened_here = False
 
     # ------------------------------------------------------------------ #
+    # clipboard / drops carry markup text
+    # ------------------------------------------------------------------ #
+    def createMimeDataFromSelection(self):
+        from PyQt6.QtCore import QMimeData
+        c = self.textCursor()
+        a, b = c.selectionStart(), c.selectionEnd()
+        text = self._serialize()
+        # doc positions map 1:1 onto serialized token list positions
+        out = []
+        pos = 0
+        i = 0
+        toks = {t[0]: t[1] for t in self._doc_tokens}
+        for ch_pos in range(a, b):
+            if ch_pos in toks:
+                out.append(toks[ch_pos])
+            else:
+                out.append(self._doc_char(ch_pos))
+        m = QMimeData()
+        m.setText(''.join(out))
+        return m
+
+    def _doc_char(self, pos: int) -> str:
+        c = self.textCursor()
+        c.setPosition(pos)
+        c.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
+        t = c.selectedText()
+        return '\n' if t == '\u2029' else t   # para separator
+
+    def insertFromMimeData(self, source):
+        self._drop_happened_here = True
+        cur = self.textCursor()
+        cur.beginEditBlock()
+        try:
+            self._insert_markup(cur, source.text() or '')
+        finally:
+            cur.endEditBlock()
+
+    # ------------------------------------------------------------------ #
+    # toolbar operations
+    # ------------------------------------------------------------------ #
     def wrap_selection(self, sid: str):
-        """Toolbar entry: wrap the selection (or cursor) in ⟦sid…sid⟧."""
         if self.markup is None:
             return
         c = self.textCursor()
         a, b = (c.selectionStart(), c.selectionEnd()) \
             if c.hasSelection() else (c.position(), c.position())
-        a, b = self._token_span(a, b)
+        self._suspend = True
         cur = self.textCursor()
         cur.beginEditBlock()
-        cur.setPosition(b)
-        cur.insertText(sid + CLOSE)
-        cur.setPosition(a)
-        cur.insertText(OPEN + sid)
-        cur.endEditBlock()
-        # cursor between the tokens for an empty wrap
+        try:
+            cur.setPosition(b)
+            cur.insertText(_OBJ, self._chip_format(sid + CLOSE))
+            cur.setPosition(a)
+            cur.insertText(_OBJ, self._chip_format(OPEN + sid))
+        finally:
+            cur.endEditBlock()
+            self._suspend = False
         if a == b:
-            cur.setPosition(a + len(OPEN + sid))
+            cur.setPosition(a + 1)
             self.setTextCursor(cur)
+        self._revalidate(commit=True)
 
     def remove_style_at(self, pos: int, sid: str):
-        pair = [t for t in self._tokens if t[2] == sid]
-        opens = [t for t in pair if t[3] == 'open' and t[0] <= pos]
+        opens = [t for t in self._doc_tokens
+                 if t[3] == sid and t[2] == 'open' and t[0] <= pos]
         if not opens:
             return
         o = opens[-1]
-        cl = self._partner(o)
-        ranges = sorted([r for r in (o, cl) if r], reverse=True)
+        p = self._partner_pos(o)
+        ranges = sorted({(o[0], o[0] + 1)} |
+                        ({(p, p + 1)} if p is not None else set()),
+                        reverse=True)
+        self._suspend = True
         cur = self.textCursor()
         cur.beginEditBlock()
-        for t in ranges:
-            cur.setPosition(t[0])
-            cur.setPosition(t[1], QTextCursor.MoveMode.KeepAnchor)
-            cur.removeSelectedText()
-        cur.endEditBlock()
+        try:
+            for x, y in ranges:
+                cur.setPosition(x)
+                cur.setPosition(y, QTextCursor.MoveMode.KeepAnchor)
+                cur.removeSelectedText()
+        finally:
+            cur.endEditBlock()
+            self._suspend = False
+        self._revalidate(commit=True)
 
     def contextMenuEvent(self, ev):
         menu = self.createStandardContextMenu()
-        if self.markup is not None:
-            pos = self.cursorForPosition(ev.pos()).position()
-            parsed, _ = self.markup.parse(self.toPlainText())
-            if parsed:
-                items, _tok = parsed
-                # styles active at pos: count chars up to pos… simpler:
-                # use tokens: opens before pos without close before pos
-                active = []
-                for t in self._tokens:
-                    if t[3] == 'open' and t[1] <= pos:
-                        p = self._partner(t)
-                        if p is None or p[0] >= pos:
-                            active.append(t[2])
-                if active:
-                    menu.addSeparator()
-                    for sid in active:
-                        act = menu.addAction(f'Remove style "{sid}" here')
-                        act.triggered.connect(
-                            lambda _=False, s=sid, p=pos:
-                            self.remove_style_at(p, s))
+        pos = self.cursorForPosition(ev.pos()).position()
+        active = []
+        for t in self._doc_tokens:
+            if t[2] == 'open' and t[0] < pos:
+                p = self._partner_pos(t)
+                if p is None or p >= pos:
+                    active.append(t[3])
+        if active:
+            menu.addSeparator()
+            for sid in active:
+                act = menu.addAction(f'Remove style "{sid}" here')
+                act.triggered.connect(
+                    lambda _=False, s=sid, p=pos:
+                    self.remove_style_at(p, s))
         menu.exec(ev.globalPos())
 
     # ------------------------------------------------------------------ #
     def _changed(self):
-        if self._loading or self._reverting or self.markup is None:
+        if self._loading or self._reverting or self._suspend or \
+                self.markup is None:
             return
         self._revalidate(commit=True)
 
     def _revalidate(self, commit: bool):
         if self.markup is None:
-            self._tokens = []
+            self._doc_tokens = []
             self.setExtraSelections([])
             return
-        text = self.toPlainText()
+        text = self._serialize()
         parsed, reason = self.markup.parse(text)
         if parsed is None:
             self._reverting = True
@@ -534,50 +788,34 @@ class TokenStyleEdit(QTextEdit):
                 if self.document().isUndoAvailable():
                     self.undo()
                 else:
-                    self.setPlainText(self._last_good)
+                    cur = self.textCursor()
+                    cur.select(QTextCursor.SelectionType.Document)
+                    self._insert_markup(cur, self.markup.text)
             finally:
                 self._reverting = False
             self.rejected.emit(reason)
-            # re-highlight the restored text
-            parsed, _ = self.markup.parse(self.toPlainText())
+            text = self._serialize()
+            parsed, _ = self.markup.parse(text)
             if parsed is None:
-                self._tokens = []
                 return
-            text = self.toPlainText()
-        items, tokens = parsed
-        self._tokens = tokens
-        self._last_good = text
-        self._decorate(items, tokens)
+        self._decorate()
         if commit:
             tree, _ = self.markup.to_tree(text)
             if tree is not None:
                 self.committed.emit(tree)
 
-    def _decorate(self, items, tokens):
+    def _decorate(self):
+        """Live bold/italic preview of the text between chips."""
         sels = []
-        for s, e, sid, kind in tokens:
-            f = QTextCharFormat()
-            f.setBackground(_chip_color(sid))
-            f.setForeground(QColor(240, 240, 240))
-            f.setFontWeight(QFont.Weight.Bold)
-            sel = QTextEdit.ExtraSelection()
-            c = self.textCursor()
-            c.setPosition(s)
-            c.setPosition(e, QTextCursor.MoveMode.KeepAnchor)
-            sel.cursor = c
-            sel.format = f
-            sels.append(sel)
-        # live formatting of the text runs (bold/italic from b/i tokens)
-        pos = 0
-        text = self.toPlainText()
-        idx = 0
-        starts = {t[0]: t for t in tokens}
-        run_start = None
+        active: List[str] = []
+        run_start: Optional[int] = None
         run_active: tuple = ()
+        end_pos = self.document().characterCount() - 1
+        tok_map = {t[0]: t for t in self._doc_tokens}
 
-        def flush(endpos):
+        def flush(endp):
             nonlocal run_start
-            if run_start is None or run_start >= endpos:
+            if run_start is None or run_start >= endp:
                 run_start = None
                 return
             f = QTextCharFormat()
@@ -585,33 +823,32 @@ class TokenStyleEdit(QTextEdit):
                 f.setFontWeight(QFont.Weight.Bold)
             if 'i' in run_active:
                 f.setFontItalic(True)
-            if f != QTextCharFormat():
+            if f.propertyCount():
                 sel = QTextEdit.ExtraSelection()
                 c = self.textCursor()
                 c.setPosition(run_start)
-                c.setPosition(endpos, QTextCursor.MoveMode.KeepAnchor)
+                c.setPosition(endp, QTextCursor.MoveMode.KeepAnchor)
                 sel.cursor = c
                 sel.format = f
                 sels.append(sel)
             run_start = None
 
-        # walk chars using token map to track b/i activity
-        active: List[str] = []
-        while pos < len(text):
-            t = starts.get(pos)
+        p = 0
+        while p < end_pos:
+            t = tok_map.get(p)
             if t is not None:
-                flush(pos)
-                if t[3] == 'open':
-                    active.append(t[2])
-                elif t[3] == 'close' and t[2] in active:
-                    active.remove(t[2])
-                pos = t[1]
+                flush(p)
+                if t[2] == 'open':
+                    active.append(t[3])
+                elif t[2] == 'close' and t[3] in active:
+                    active.remove(t[3])
+                p += 1
                 continue
             if run_start is None:
-                run_start = pos
+                run_start = p
                 run_active = tuple(active)
-            pos += 1
-        flush(pos)
+            p += 1
+        flush(end_pos)
         self.setExtraSelections(sels)
 
 
