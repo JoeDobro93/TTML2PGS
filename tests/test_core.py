@@ -1017,6 +1017,48 @@ class TestPipelineAndQueue(unittest.TestCase):
         rebuilt.root = tree2
         self.assertEqual(rebuilt.plain_text(), 'x⟦y⟧z')
 
+    def test_cjk_normal_targets_medium_weight(self):
+        """CJK 'normal' picks a 500-weight face when available (Chrome's
+        Yu Gothic Medium behavior); Latin keeps 400."""
+        from ttml2pgs.core.fonts import FaceRecord, FontManager
+        fm = FontManager()                       # fresh, no scan
+        recs = [FaceRecord(path='/fake/yu-r.ttf', index=0,
+                           families=['Yu Gothic'], weight=400),
+                FaceRecord(path='/fake/yu-m.ttf', index=0,
+                           families=['Yu Gothic'], weight=500),
+                FaceRecord(path='/fake/yu-b.ttf', index=0,
+                           families=['Yu Gothic'], weight=700)]
+        fm.records = recs
+        for r in recs:
+            for fam in r.families:
+                fm.by_family.setdefault('yugothic', []).append(r)
+        ja = fm.resolve_stack(['Yu Gothic'], lang='ja')
+        self.assertEqual(ja[0].weight, 500)
+        en = fm.resolve_stack(['Yu Gothic'], lang='en')
+        self.assertEqual(en[0].weight, 400)
+        bold = fm.resolve_stack(['Yu Gothic'], lang='ja', weight='bold')
+        self.assertEqual(bold[0].weight, 700)
+
+    def test_vertical_dash_rotates_without_vert_alt(self):
+        """A ー/— style bar in vertical flow must not lie horizontally
+        across the column when the font has no vert alternate."""
+        from ttml2pgs.core.layout import (LayoutEngine, TextItem, RunStyle,
+                                          _ROTATE_IF_NO_VERT_ALT)
+        from ttml2pgs.core.fonts import FontManager
+        self.assertIn('ー', _ROTATE_IF_NO_VERT_ALT)
+        fm = FontManager.instance()
+        rs = RunStyle(font_px=48.0, lang='ja')
+        rs.faces = fm.resolve_stack(['sans-serif'], lang='ja')
+        eng = LayoutEngine()
+        atoms_lines = eng._items_to_atom_lines(
+            [TextItem('テー', rs)], vertical=True)
+        atoms = atoms_lines[0]
+        dash = atoms[-1]
+        # whichever way it resolved, the ink must be TALLER than wide
+        # (rotated bar or a proper vertical alternate — never horizontal)
+        res = eng.layout([TextItem('テー', rs)], 500, vertical=True)
+        self.assertGreater(res.height, res.width * 1.5)
+
     def test_no_auto_language_sets_and_migration(self):
         """Opening a file must not clone Default into a language set;
         saved identical clones from older builds are dropped on load."""
@@ -1310,6 +1352,15 @@ class TestPipelineAndQueue(unittest.TestCase):
         self.assertTrue(after.endswith(sid + '⟧'))
         self.assertTrue(committed, 'wrap must commit a rebuilt tree')
 
+        # copying a range that spans chips exports markup literals via
+        # the piece map (regression: per-char cursor walk crashed)
+        c2 = ed.textCursor()
+        c2.select(c2.SelectionType.Document)
+        ed.setTextCursor(c2)
+        for _ in range(3):
+            mime = ed.createMimeDataFromSelection()
+            self.assertEqual(mime.text(), ed._serialize())
+
         # deleting a chip removes its partner but keeps the text
         tok = ed._doc_tokens[0]
         sel = ed.textCursor()
@@ -1393,7 +1444,7 @@ class TestPipelineAndQueue(unittest.TestCase):
     def test_new_defaults(self):
         from ttml2pgs.core.overrides import StyleOverrides
         so = StyleOverrides()
-        self.assertEqual(so.weight_boost, 3.0)
+        self.assertEqual(so.weight_boost, 1.0)
         self.assertTrue(so.auto_color)
         # auto-color engages by default: SDR videos get the SDR preset
         st = so.to_style(is_hdr=False)

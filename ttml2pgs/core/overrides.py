@@ -53,9 +53,10 @@ class StyleOverrides:
     opacity_mult: float = 1.0
 
     #: stroke weight boost: multiplies the base stem darkening (Chrome-
-    #: style heavier rasterization). 0 = off; 3 = the default calibrated
-    #: against v1's look; higher keeps thickening without going bold.
-    weight_boost: float = 3.0
+    #: style heavier rasterization). 0 = off; 1 = default. CJK thickness
+    #: now comes primarily from Medium-weight face selection, so only a
+    #: light darkening is needed by default.
+    weight_boost: float = 1.0
 
     override_line_height: bool = False
     line_height: Dim = field(default_factory=lambda: Dim(1.25, ''))

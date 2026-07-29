@@ -646,17 +646,16 @@ class TokenStyleEdit(QTextEdit):
         return out
 
     def _serialize(self) -> str:
-        """Document → markup text; also rebuilds self._doc_tokens."""
+        """Document → markup text; also rebuilds self._doc_tokens and the
+        per-doc-position piece list used by clipboard/drag exports."""
         doc = self.document()
-        parts: List[str] = []
+        pieces: List[str] = []       # one entry per document character
         self._doc_tokens = []
-        pos = 0
         block = doc.begin()
         first = True
         while block.isValid():
             if not first:
-                parts.append('\n')
-                pos += 1
+                pieces.append('\n')
             first = False
             it = block.begin()
             while not it.atEnd():
@@ -667,16 +666,16 @@ class TokenStyleEdit(QTextEdit):
                     lit = fmt.property(PROP_LITERAL) or ''
                     kind, sid, _lab = _literal_meta(lit)
                     for _ in range(len(text)):     # normally 1 char
-                        parts.append(lit)
-                        self._doc_tokens.append((pos, lit, kind, sid))
-                        pos += 1
+                        self._doc_tokens.append((len(pieces), lit, kind,
+                                                 sid))
+                        pieces.append(lit)
                 else:
-                    clean = text.replace(_OBJ, '')
-                    parts.append(clean)
-                    pos += len(clean)
+                    for c in text:
+                        pieces.append('' if c == _OBJ else c)
                 it += 1
             block = block.next()
-        return ''.join(parts)
+        self._doc_pieces = pieces
+        return ''.join(pieces)
 
     # ------------------------------------------------------------------ #
     def load(self, markup: Optional[CueMarkup]):
@@ -828,31 +827,24 @@ class TokenStyleEdit(QTextEdit):
     # ------------------------------------------------------------------ #
     # clipboard / drops carry markup text
     # ------------------------------------------------------------------ #
+    _doc_pieces: List[str] = []
+    _mime_keepalive = None
+
     def createMimeDataFromSelection(self):
         from PyQt6.QtCore import QMimeData
         c = self.textCursor()
         a, b = c.selectionStart(), c.selectionEnd()
-        text = self._serialize()
-        # doc positions map 1:1 onto serialized token list positions
-        out = []
-        pos = 0
-        i = 0
-        toks = {t[0]: t[1] for t in self._doc_tokens}
-        for ch_pos in range(a, b):
-            if ch_pos in toks:
-                out.append(toks[ch_pos])
-            else:
-                out.append(self._doc_char(ch_pos))
+        # refresh the piece map if it's stale (positions map 1:1 to chars)
+        if len(self._doc_pieces) != self.document().characterCount() - 1:
+            self._serialize()
+        a = max(0, min(a, len(self._doc_pieces)))
+        b = max(a, min(b, len(self._doc_pieces)))
         m = QMimeData()
-        m.setText(''.join(out))
+        m.setText(''.join(self._doc_pieces[a:b]))
+        # PyQt/Qt ownership of factory results is murky across paths \u2014
+        # keep a reference so the clipboard never holds a dead object
+        self._mime_keepalive = m
         return m
-
-    def _doc_char(self, pos: int) -> str:
-        c = self.textCursor()
-        c.setPosition(pos)
-        c.setPosition(pos + 1, QTextCursor.MoveMode.KeepAnchor)
-        t = c.selectedText()
-        return '\n' if t == '\u2029' else t   # para separator
 
     def insertFromMimeData(self, source):
         self._drop_happened_here = True

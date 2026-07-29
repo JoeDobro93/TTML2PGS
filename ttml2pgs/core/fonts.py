@@ -365,8 +365,15 @@ class FontManager:
         fallback chain, but never displaces a specific family the
         subtitle author asked for.
         """
-        w = 700 if str(weight) in ('bold', '700', '800', '900') else 400
         lk = _lang_key(lang)
+        if str(weight) in ('bold', '700', '800', '900'):
+            w = 700
+        else:
+            # CJK 'normal' targets Medium (500): 400-weight CJK faces are
+            # designed for print/body text and look anemic as subtitles —
+            # Chromium ships the same choice (Yu Gothic Medium) on
+            # Windows. Latin keeps 400.
+            w = 500 if lk else 400
         preferred = (preferred or '').strip()
         key = (tuple(families), lk, w, italic, preferred)
         cached = self._resolve_cache.get(key)

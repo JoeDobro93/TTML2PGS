@@ -171,22 +171,25 @@ class AppState:
                 for lang in [l for l, so in self.overrides.by_lang.items()
                              if l and so.to_dict() == bd]:
                     del self.overrides.by_lang[lang]
-            if int(data.get('version', 1)) < 2:
-                # 2.0.1 defaults changed: stem darkening calibrated to 3.0
-                # and auto-color enabled. Migrate configs saved before the
-                # bump unless the user had set their own values.
+            version = int(data.get('version', 1))
+            if version < 2:
                 for so in self.overrides.by_lang.values():
-                    if so.weight_boost == 1.0:
-                        so.weight_boost = 3.0
                     if not so.override_color:
                         so.auto_color = True
+            if version < 3:
+                # CJK thickness now comes from Medium-weight face
+                # selection; the old boost=3 default on top would be too
+                # heavy. Reset previous defaults to the new 1.0.
+                for so in self.overrides.by_lang.values():
+                    if so.weight_boost in (1.0, 3.0):
+                        so.weight_boost = 1.0
         except (OSError, ValueError):
             pass
 
     def save_settings(self):
         try:
             with open(self._settings_path, 'w', encoding='utf-8') as f:
-                json.dump({'version': 2,
+                json.dump({'version': 3,
                            'settings': self.settings,
                            'overrides': self.overrides.to_dict()},
                           f, indent=1)

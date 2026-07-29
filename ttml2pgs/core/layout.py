@@ -210,6 +210,10 @@ def _is_upright_in_vertical(ch: str) -> bool:
 
 _FW_DIGITS = str.maketrans('0123456789', '０１２３４５６７８９')
 
+#: horizontal-bar-shaped chars that MUST rotate in vertical text when the
+#: font provides no 'vert' alternate glyph for them
+_ROTATE_IF_NO_VERT_ALT = set('ーｰ〜～―—–‥…＝〰')
+
 #: last-chance substitutions for characters most fonts lack, tried before
 #: falling back to a pan-unicode bitmap font (keeps rare punctuation from
 #: rendering in an ugly fallback face).
@@ -407,6 +411,21 @@ class LayoutEngine:
             if vertical:
                 upright = kind == 'char' or all(
                     _is_upright_in_vertical(c) or c.isspace() for c in chunk)
+                if upright and chunk in _ROTATE_IF_NO_VERT_ALT:
+                    # dash/prolonged marks are horizontal bars: they only
+                    # work upright when the font swaps in a vertical
+                    # alternate ('vert'). If it doesn't, rotate instead —
+                    # otherwise the bar lies across the column and fuses
+                    # into the neighboring glyph.
+                    up = self._shape_text(chunk, item.style,
+                                          vertical_upright=True)
+                    hz = self._shape_text(chunk, item.style,
+                                          vertical_upright=False)
+                    same_glyph = (
+                        len(up) == 1 and len(hz) == 1 and
+                        [g.gid for g in up[0].glyphs] ==
+                        [g.gid for g in hz[0].glyphs])
+                    upright = not same_glyph
                 runs = self._shape_text(chunk, item.style,
                                         vertical_upright=upright,
                                         rot90=not upright)

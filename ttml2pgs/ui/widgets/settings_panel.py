@@ -377,7 +377,10 @@ class OverrideEditor(QWidget):
         self.ed_family.setCurrentText(', '.join(so.font_family))
         self.ed_family.setToolTip(
             'Force this family over whatever the file specifies. Pick '
-            'from installed fonts or type a comma-separated stack.')
+            'from installed fonts or type a comma-separated stack. '
+            'Generic names (sans-serif, serif, monospace — and '
+            '"Japanese", which Netflix files use) expand to the '
+            'language-appropriate font stack.')
         if families:
             comp = QCompleter(families, self.ed_family)
             comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -389,8 +392,9 @@ class OverrideEditor(QWidget):
         self.spin_boost.setValue(so.weight_boost)
         self.spin_boost.setToolTip(
             'Stem darkening: thickens every glyph without switching to a '
-            'bold face. 3 is the default (calibrated against the v1 '
-            'look); 0 disables; go higher for even heavier text.')
+            'bold face. 1 is the default — CJK text already picks '
+            'Medium-weight faces like Chrome does, so only light '
+            'darkening is needed. 0 disables; higher = heavier.')
         form.addRow('Stroke weight boost:', self.spin_boost)
 
         # ---- Color ---------------------------------------------------- #
