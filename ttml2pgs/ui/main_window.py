@@ -350,6 +350,7 @@ class MainWindow(QMainWindow):
         self.state.save_settings()
         self.state.save_session()
         self.queue.shutdown()
+        self.preview_pane.shutdown_players()
         if self.preview_pane.popout:
             self.preview_pane.popout.close()
         super().closeEvent(ev)

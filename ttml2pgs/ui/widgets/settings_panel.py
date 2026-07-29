@@ -100,12 +100,28 @@ class CollapsibleSection(QWidget):
         self.content.setVisible(on)
 
 
+def compact(*widgets, width=48):
+    """Let numeric/choice widgets shrink instead of forcing pane width."""
+    for w in widgets:
+        w.setMinimumWidth(width)
+        w.setSizePolicy(QSizePolicy.Policy.Preferred,
+                        QSizePolicy.Policy.Fixed)
+        if isinstance(w, QComboBox):
+            w.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy
+                .AdjustToMinimumContentsLengthWithIcon)
+            w.setMinimumContentsLength(6)
+
+
 class ColorButton(QPushButton):
     changed = pyqtSignal()
 
     def __init__(self, color=(255, 255, 255, 255)):
         super().__init__()
         self._color = color
+        self.setMinimumWidth(58)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Fixed)
         self.clicked.connect(self._pick)
         self._sync()
 
@@ -247,6 +263,7 @@ class OverrideEditor(QWidget):
         btn.changed.connect(manual_change)
         spin.valueChanged.connect(manual_change)
 
+        compact(cmb, spin)
         row.addWidget(cmb, 1)
         row.addWidget(btn)
         row.addWidget(QLabel('α:'))
@@ -258,20 +275,12 @@ class OverrideEditor(QWidget):
     def __init__(self, so: StyleOverrides):
         super().__init__()
         self.so = so
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(2)
-
-        # ONE collapsible box (like Layout/canvas) holding every text
-        # override, with mini headers — collapsing it leaves no scattered
-        # dead space.
-        content = QWidget()
-        form = QFormLayout(content)
-        form.setContentsMargins(18, 2, 4, 6)
+        # plain form with mini headers — the collapsible box lives OUTSIDE
+        # the language tabs (SettingsPane wraps the whole tab widget), so
+        # collapsing shrinks the pane like every other section.
+        form = QFormLayout(self)
+        form.setContentsMargins(10, 4, 6, 6)
         form.setVerticalSpacing(4)
-        lay.addWidget(CollapsibleSection('Text style overrides', content,
-                                         expanded=True))
-        lay.addStretch()
 
         def header(text):
             lbl = QLabel(text.upper())
@@ -403,6 +412,9 @@ class OverrideEditor(QWidget):
         self.spin_alpha.setSingleStep(0.05)
         self.spin_alpha.setValue(so.opacity_mult)
         form.addRow('Global opacity:', self.spin_alpha)
+
+        compact(self.spin_boost, self.spin_salpha, self.spin_alpha,
+                self.cmb_default_font, self.ed_family)
 
         self._load_flags()
         for w in (self.chk_size, self.chk_family, self.chk_color,
@@ -912,14 +924,17 @@ class SettingsPane(QWidget):
         self.lang_tabs = QTabWidget()
         self.lang_tabs.setTabsClosable(True)
         self.lang_tabs.tabCloseRequested.connect(self._close_lang_tab)
-        self.lang_tabs.setSizePolicy(QSizePolicy.Policy.Preferred,
-                                     QSizePolicy.Policy.Minimum)
         btn_add_lang = QPushButton('+')
         btn_add_lang.setFixedWidth(28)
         btn_add_lang.setToolTip('Add a language-specific override set')
         btn_add_lang.clicked.connect(self._add_lang_tab)
         self.lang_tabs.setCornerWidget(btn_add_lang)
-        ovl.addWidget(self.lang_tabs)
+        # the collapsible wraps the WHOLE language tab widget: a stacked
+        # widget reports the max size of all its pages, so a collapsible
+        # inside a page could never shrink the box. This way the section
+        # behaves exactly like Layout/Post-processing below.
+        ovl.addWidget(CollapsibleSection('Text style overrides (per language)',
+                                         self.lang_tabs, expanded=True))
 
         self.layout_editor = LayoutOptionsEditor(self.overrides.layout)
         self.layout_editor.changed.connect(self.overrides_changed.emit)
@@ -944,16 +959,36 @@ class SettingsPane(QWidget):
         player = QWidget()
         fl = QFormLayout(player)
         fl.setContentsMargins(18, 2, 4, 6)
+        self.cmb_engine = QComboBox()
+        self.cmb_engine.addItems([
+            'Auto — mpv when available (HDR-correct)',
+            'Qt Multimedia only'])
+        self.cmb_engine.setCurrentIndex(
+            1 if app_settings.get('player_engine', 'auto') == 'qt' else 0)
+        self.cmb_engine.setToolTip(
+            'Engine for the EMBEDDED preview player. mpv (libmpv) '
+            'tone-maps HDR correctly and decodes almost anything — '
+            'install mpv, or on Windows drop libmpv-2.dll into the '
+            'folder below. Qt Multimedia is the fallback (no HDR tone '
+            'mapping).')
+        compact(self.cmb_engine)
+        fl.addRow('Embedded engine:', self.cmb_engine)
+        self.ed_mpv_dir = QLineEdit(app_settings.get('mpv_dll_dir', ''))
+        self.ed_mpv_dir.setPlaceholderText(
+            r'folder containing libmpv-2.dll (Windows only)')
+        fl.addRow('libmpv folder:', self.ed_mpv_dir)
         self.ed_player = QLineEdit(app_settings.get('external_player', ''))
         self.ed_player.setPlaceholderText(r'e.g. C:\Program Files\MPC-BE\mpc-be64.exe')
         self.ed_player_args = QLineEdit(
             app_settings.get('external_player_args', '"{file}" /start {ms}'))
-        fl.addRow('Executable:', self.ed_player)
+        fl.addRow('External exe:', self.ed_player)
         fl.addRow('Arguments:', self.ed_player_args)
+        self.cmb_engine.currentIndexChanged.connect(self._post_changed)
+        self.ed_mpv_dir.editingFinished.connect(self._post_changed)
         self.ed_player.editingFinished.connect(self._post_changed)
         self.ed_player_args.editingFinished.connect(self._post_changed)
-        ovl.addWidget(CollapsibleSection('External player', player,
-                                         expanded=False))
+        ovl.addWidget(CollapsibleSection('Player engine / external player',
+                                         player, expanded=False))
         ovl.addStretch()
 
         scroll = QScrollArea()
@@ -1037,6 +1072,9 @@ class SettingsPane(QWidget):
         self.app_settings['external_player'] = self.ed_player.text().strip()
         self.app_settings['external_player_args'] = \
             self.ed_player_args.text().strip()
+        self.app_settings['player_engine'] = \
+            'qt' if self.cmb_engine.currentIndex() == 1 else 'auto'
+        self.app_settings['mpv_dll_dir'] = self.ed_mpv_dir.text().strip()
         self.overrides_changed.emit()
 
     # -- language tabs -------------------------------------------------- #

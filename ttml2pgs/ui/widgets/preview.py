@@ -39,9 +39,11 @@ from ...core.model import Cue, SubtitleDocument
 from ...core.overrides import OverrideSet
 from ...core.renderer import CueRenderer, RenderedCue, compute_canvas
 from ...core.video import extract_frame
+from .mpv_player import MpvPlayerWidget, mpv_available
 
 # Embedded playback is optional — degrade to stills when QtMultimedia or
-# its platform backend is unavailable.
+# its platform backend is unavailable. mpv (libmpv), when installed, is
+# preferred: it tone-maps HDR correctly and decodes far more.
 try:
     from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
     from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -466,6 +468,11 @@ class PopOutWindow(QWidget):
                          Qt.WindowType.WindowStaysOnTopHint |
                          Qt.WindowType.Tool)
         self.stage = _Stage(self)
+        # content never needs mouse input inside the pop-out — letting
+        # events fall through keeps window dragging + the right-click
+        # close menu working over the whole surface.
+        self.stage.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.stage)
@@ -477,6 +484,8 @@ class PopOutWindow(QWidget):
         stills stage. release_content() gives it back."""
         self.stage.hide()
         self.layout().addWidget(widget)
+        widget.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         widget.show()
         self._external = widget
 
@@ -484,6 +493,8 @@ class PopOutWindow(QWidget):
         w = self._external
         if w is not None:
             self.layout().removeWidget(w)
+            w.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
             w.setParent(None)
             self._external = None
         self.stage.show()
@@ -572,6 +583,40 @@ def _fmt_ms(ms: float) -> str:
     return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
+def _region_overlay_bitmap(scene: 'PreviewScene'):
+    """Rasterize the region boxes to one RGBA tile for the mpv overlay
+    path (mpv draws pixel overlays, not scene items)."""
+    boxes = scene.region_boxes or []
+    if not boxes:
+        return None
+    from PIL import Image, ImageDraw, ImageFont
+    pad = 4
+    x0 = max(0, int(min(b[2] for b in boxes)) - pad)
+    y0 = max(0, int(min(b[3] for b in boxes)) - pad)
+    x1 = min(scene.canvas_w, int(max(b[2] + b[4] for b in boxes)) + pad)
+    y1 = min(scene.canvas_h, int(max(b[3] + b[5] for b in boxes)) + pad)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    img = Image.new('RGBA', (x1 - x0, y1 - y0), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.load_default(24)
+    except TypeError:                                  # Pillow < 10.1
+        font = ImageFont.load_default()
+    for rid, hexc, bx, by, bw, bh, corner in boxes:
+        rx, ry = bx - x0, by - y0
+        d.rectangle([rx, ry, rx + bw - 1, ry + bh - 1],
+                    outline=hexc, width=3)
+        tb = d.textbbox((0, 0), rid, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        tx = rx + 6 if corner.endswith('left') else rx + bw - tw - 6
+        ty = ry + 4 if corner.startswith('top') else ry + bh - th - 8
+        d.text((tx + 1, ty + 1), rid, fill=(0, 0, 0, 230), font=font)
+        d.text((tx, ty), rid, fill=hexc, font=font)
+    import numpy as _np
+    return ('__regions__', x0, y0, _np.asarray(img).copy())
+
+
 # --------------------------------------------------------------------------- #
 # The pane
 # --------------------------------------------------------------------------- #
@@ -595,6 +640,10 @@ class PreviewPane(QWidget):
         self._player = None
         self._audio = None
         self._player_failed = False
+        self._mpv: Optional[MpvPlayerWidget] = None
+        self._mpv_failed = False
+        self._backend = ''                  # '' | 'mpv' | 'qt'
+        self._mpv_region_overlay = None     # (x, y, bitmap) for mpv mode
 
         self.worker = _RenderWorker()
         self.worker.scene_ready.connect(self._on_scene)
@@ -616,11 +665,12 @@ class PreviewPane(QWidget):
         self.chk_player = QCheckBox('Embedded player')
         self.chk_player.setToolTip(
             'Play the bound video right here with live subtitle overlays '
-            '(SubtitleEdit-style). Unavailable if the platform cannot '
-            'decode the file — stills mode is used instead.')
-        self.chk_player.setEnabled(MULTIMEDIA_AVAILABLE)
+            '(SubtitleEdit-style). Uses the mpv engine when libmpv is '
+            'installed (correct HDR tone mapping, wide codec support), '
+            'falling back to Qt Multimedia otherwise.')
+        self.chk_player.setEnabled(MULTIMEDIA_AVAILABLE or mpv_available())
         bar.addWidget(self.chk_player)
-        bar.addWidget(QLabel('Matte AR:'))
+        bar.addWidget(QLabel('AR:'))
         self.spin_ar_w = QDoubleSpinBox()
         self.spin_ar_w.setRange(0.1, 10000)
         self.spin_ar_w.setValue(16.0)
@@ -629,12 +679,20 @@ class PreviewPane(QWidget):
         self.spin_ar_h.setRange(0.1, 10000)
         self.spin_ar_h.setValue(9.0)
         self.spin_ar_h.setDecimals(3)
+        for sp in (self.spin_ar_w, self.spin_ar_h):
+            sp.setMinimumWidth(52)
+            sp.setSizePolicy(QSizePolicy.Policy.Preferred,
+                             QSizePolicy.Policy.Fixed)
         self.chk_matte = QCheckBox('Matte')
         self.chk_matte.setChecked(True)
         self.btn_bg = QPushButton('BG')
-        self.chk_frames = QCheckBox('Video frames')
-        self.chk_tonemap = QCheckBox('Tone-map HDR')
-        self.chk_regions = QCheckBox('Show regions')
+        self.btn_bg.setFixedWidth(34)
+        self.chk_frames = QCheckBox('Frames')
+        self.chk_frames.setToolTip('Extract video frames behind stills')
+        self.chk_tonemap = QCheckBox('Tone-map')
+        self.chk_tonemap.setToolTip('Tone-map HDR sources for the still '
+                                    'frame extraction')
+        self.chk_regions = QCheckBox('Regions')
         self.chk_regions.setToolTip(
             'Outline every region with its name, each in a distinct '
             'color — works in stills and player mode. Useful for '
@@ -737,8 +795,11 @@ class PreviewPane(QWidget):
             self._matte_changed()
         if video_changed:
             self._player_failed = False
+            self._mpv_failed = False
             if self._player is not None:
                 self._load_player_source()
+            if self._mpv is not None and self._mpv.ok() and video_path:
+                self._mpv.load(video_path)
         self.schedule_render()
 
     def _ctx(self) -> Optional[_RenderContext]:
@@ -764,8 +825,8 @@ class PreviewPane(QWidget):
     def set_cue(self, cue: Optional[Cue]):
         self.cue = cue
         if cue is not None and self._player_active():
-            self._player.setPosition(int(cue.begin_ms) + 10)
-            self._player.pause()
+            self._pl_seek(cue.begin_ms + 10)
+            self._pl_pause(True)
             self._sync_play_button()
             self._update_overlays(cue.begin_ms + 10)
         self.schedule_render()
@@ -783,11 +844,10 @@ class PreviewPane(QWidget):
         if ctx is None or self.cue is None:
             return
         if self._player_active():
-            self._update_overlays(self._player.position(), force=True)
-        # the pop-out is a stills window even in player mode, so it always
-        # wants the extracted video frame behind the cue
+            self._update_overlays(self._pl_position(), force=True)
+        # a stills pop-out wants the extracted video frame behind the cue
         want_frame = bool(self.video_path) and (
-            self.popout is not None or
+            (self.popout is not None and not self._popped_player) or
             (self.chk_frames.isChecked() and not self._player_active()))
         self.worker.request_scene(ctx, self.cue, want_frame,
                                   self.chk_tonemap.isChecked())
@@ -796,8 +856,16 @@ class PreviewPane(QWidget):
         self.stage.set_scene(scene)
         self.player_view.set_canvas(scene.canvas_w, scene.canvas_h)
         self.player_view.set_region_boxes(scene.region_boxes)
+        if self._mpv is not None:
+            self._mpv.set_canvas(scene.canvas_w, scene.canvas_h,
+                                 scene.content)
+        self._mpv_region_overlay = _region_overlay_bitmap(scene) \
+            if scene.region_boxes else None
+        if self._backend == 'mpv' and self._player_active():
+            self._update_overlays(self._pl_position(), force=True)
         n = len(scene.renders or [])
-        mode = 'player' if self._player_active() else 'stills'
+        mode = ('player·mpv' if self._backend == 'mpv' else 'player') \
+            if self._player_active() else 'stills'
         self.lbl_info.setText(
             f"canvas {scene.canvas_w}x{scene.canvas_h} · {n} cue"
             f"{'s' if n != 1 else ''} on screen · {mode}"
@@ -812,39 +880,140 @@ class PreviewPane(QWidget):
     # Embedded player
     # ------------------------------------------------------------------ #
     def _player_active(self) -> bool:
-        return (MULTIMEDIA_AVAILABLE and self.chk_player.isChecked()
-                and self._player is not None and not self._player_failed)
+        if not self.chk_player.isChecked():
+            return False
+        if self._backend == 'mpv':
+            return self._mpv is not None and self._mpv.ok()
+        return (MULTIMEDIA_AVAILABLE and self._player is not None
+                and not self._player_failed)
+
+    def _want_mpv(self) -> bool:
+        if self._mpv_failed:
+            return False
+        if self.app_settings.get('player_engine', 'auto') == 'qt':
+            return False
+        return mpv_available([self.app_settings.get('mpv_dll_dir', '')])
 
     def _player_mode_changed(self, on: bool):
         if self._popped_player and self.popout is not None:
-            self.popout.close()          # reclaims the player view first
-        if on and not MULTIMEDIA_AVAILABLE:
-            self.chk_player.setChecked(False)
-            return
+            self.popout.close()          # reclaims the player first
         if on and not self.video_path:
             self.lbl_info.setText('No video bound — player mode needs a '
                                   'matched video.')
             self.chk_player.setChecked(False)
             return
         if on:
-            self._ensure_player()
-            self._stack.setCurrentWidget(self.player_view)
+            if self._want_mpv() and self._ensure_mpv():
+                self._backend = 'mpv'
+                self._stack.setCurrentWidget(self._mpv)
+            elif MULTIMEDIA_AVAILABLE:
+                self._backend = 'qt'
+                self._ensure_player()
+                self._stack.setCurrentWidget(self.player_view)
+            else:
+                self.lbl_info.setText('No playback engine available — '
+                                      'install mpv (libmpv) for embedded '
+                                      'playback.')
+                self.chk_player.setChecked(False)
+                return
             self.btn_play.setEnabled(True)
             self.slider.setEnabled(True)
             if self.cue is not None:
-                self._player.setPosition(int(self.cue.begin_ms) + 10)
-                self._player.pause()
-            self._update_overlays(self._player.position() if self._player
-                                  else 0, force=True)
+                self._pl_seek(self.cue.begin_ms + 10)
+                self._pl_pause(True)
+            self._update_overlays(self._pl_position(), force=True)
         else:
-            if self._player is not None:
-                self._player.pause()
+            self._pl_pause(True)
             self._play_timer.stop()
             self._stack.setCurrentWidget(self.stage)
             self.btn_play.setEnabled(False)
             self.slider.setEnabled(False)
+            self._backend = ''
             self.schedule_render()
         self._sync_play_button()
+
+    # -- backend-agnostic transport helpers ----------------------------- #
+    def _pl_seek(self, ms: float):
+        if self._backend == 'mpv' and self._mpv is not None:
+            self._mpv.seek_ms(ms)
+        elif self._player is not None:
+            self._player.setPosition(int(ms))
+
+    def _pl_pause(self, paused: bool):
+        if self._backend == 'mpv' and self._mpv is not None:
+            self._mpv.set_pause(paused)
+        elif self._player is not None:
+            if paused:
+                self._player.pause()
+            else:
+                self._player.play()
+
+    def _pl_position(self) -> float:
+        if self._backend == 'mpv' and self._mpv is not None:
+            return self._mpv.position_ms()
+        return float(self._player.position()) if self._player else 0.0
+
+    def _pl_playing(self) -> bool:
+        if self._backend == 'mpv' and self._mpv is not None:
+            return not self._mpv.is_paused()
+        return bool(MULTIMEDIA_AVAILABLE and self._player is not None and
+                    self._player.playbackState() ==
+                    QMediaPlayer.PlaybackState.PlayingState)
+
+    # -- mpv backend ----------------------------------------------------- #
+    def _wire_mpv(self, w: MpvPlayerWidget):
+        w.position_changed.connect(self._mpv_position)
+        w.duration_changed.connect(
+            lambda d: self.slider.setRange(0, int(d)))
+        w.pause_changed.connect(lambda *_: self._sync_play_button())
+        w.load_failed.connect(self._mpv_load_failed)
+
+    def _ensure_mpv(self) -> bool:
+        if self._mpv is not None and self._mpv.ok():
+            return True
+        w = MpvPlayerWidget()
+        self._stack.addWidget(w)
+        if not w.start():
+            self._stack.removeWidget(w)
+            w.deleteLater()
+            self._mpv_failed = True
+            return False
+        self._wire_mpv(w)
+        self._mpv = w
+        w.set_mute(self.chk_mute.isChecked())
+        if self.stage.scene:
+            w.set_canvas(self.stage.scene.canvas_w,
+                         self.stage.scene.canvas_h,
+                         self.stage.scene.content)
+        if self.video_path:
+            start = (self.cue.begin_ms / 1000.0) if self.cue else 0.0
+            w.load(self.video_path)
+            w.seek_ms(start * 1000.0)
+        return True
+
+    def _mpv_position(self, ms: float):
+        if self._backend != 'mpv':
+            return
+        if not self.slider.isSliderDown():
+            self.slider.blockSignals(True)
+            self.slider.setValue(int(ms))
+            self.slider.blockSignals(False)
+        self.lbl_time.setText(_fmt_ms(ms))
+        self._update_overlays(ms)
+
+    def _mpv_load_failed(self, msg: str):
+        self._mpv_failed = True
+        if self._mpv is not None:
+            self._mpv.shutdown()
+        if self.chk_player.isChecked():
+            if MULTIMEDIA_AVAILABLE:
+                self.lbl_info.setText(
+                    f'mpv failed ({msg}) — falling back to Qt Multimedia.')
+                self._player_mode_changed(True)
+            else:
+                self.lbl_info.setText(
+                    f'Embedded playback failed: {msg} — stills mode.')
+                self.chk_player.setChecked(False)
 
     def _ensure_player(self):
         if self._player is not None:
@@ -881,31 +1050,28 @@ class PreviewPane(QWidget):
     def _toggle_play(self):
         if not self._player_active():
             return
-        if self._player.playbackState() == \
-                QMediaPlayer.PlaybackState.PlayingState:
-            self._player.pause()
-            self._play_timer.stop()
-        else:
-            self._player.play()
-            self._play_timer.start()
+        playing = self._pl_playing()
+        self._pl_pause(playing)
+        if self._backend == 'qt':
+            if playing:
+                self._play_timer.stop()
+            else:
+                self._play_timer.start()
         self._sync_play_button()
 
     def _sync_play_button(self):
-        if MULTIMEDIA_AVAILABLE and self._player is not None and \
-                self._player.playbackState() == \
-                QMediaPlayer.PlaybackState.PlayingState:
-            self.btn_play.setText('⏸')
-        else:
-            self.btn_play.setText('▶')
+        self.btn_play.setText('⏸' if self._pl_playing() else '▶')
 
     def _slider_seek(self, pos: int):
         if self._player_active():
-            self._player.setPosition(pos)
+            self._pl_seek(pos)
             self._update_overlays(pos, force=True)
 
     def _mute_changed(self, muted: bool):
         if self._audio is not None:
             self._audio.setMuted(muted)
+        if self._mpv is not None:
+            self._mpv.set_mute(muted)
 
     def _position_changed(self, pos: int):
         if not self.slider.isSliderDown():
@@ -915,7 +1081,9 @@ class PreviewPane(QWidget):
         self.lbl_time.setText(_fmt_ms(pos))
 
     def _tick(self):
-        if self._player_active():
+        # Qt backend has no per-frame position callback — poll. (mpv's
+        # position_changed signal drives overlays instead.)
+        if self._player_active() and self._backend == 'qt':
             self._update_overlays(self._player.position())
 
     # -- overlay sync ---------------------------------------------------- #
@@ -949,7 +1117,13 @@ class PreviewPane(QWidget):
                     self.worker.request_cue(ctx, c)
         if not missing:
             self._last_overlay_key = key
-        self.player_view.set_overlays(renders)
+        if self._backend == 'mpv' and self._mpv is not None:
+            items = [(rc.cue_uid, rc.x, rc.y, rc.bitmap) for rc in renders]
+            if self._mpv_region_overlay is not None:
+                items.append(self._mpv_region_overlay)
+            self._mpv.set_overlays(items)
+        else:
+            self.player_view.set_overlays(renders)
 
     def _on_cue_render(self, uid: int, rc, generation: int):
         if generation != self._generation:
@@ -984,46 +1158,117 @@ class PreviewPane(QWidget):
 
     _popped_player = False
 
+    def _canvas_size(self) -> Tuple[int, int]:
+        if self.stage.scene:
+            return self.stage.scene.canvas_w, self.stage.scene.canvas_h
+        return self.player_view._canvas
+
     def _toggle_popout(self):
         if self.popout is None:
             self.popout = PopOutWindow()
             self.popout.closed.connect(self._popout_closed)
-            if self._player_active():
-                # move the LIVE player view into the pop-out at 1:1 — the
-                # transport bar in the main pane keeps controlling it, and
-                # the video plays only in the pop-out.
+            if self._player_active() and self._backend == 'mpv':
+                # mpv is bound to a native window id — it can't be
+                # reparented, so respawn the engine inside the pop-out at
+                # the same position/pause state.
                 self._popped_player = True
-                self._stack.removeWidget(self.player_view)
-                self.popout.set_content(self.player_view)
-                w, h = self.player_view._canvas
-                self.popout.lock_size(w, h)
+                self.popout.lock_size(*self._canvas_size())
+                self.popout.show()
+                self._respawn_mpv(into_popout=True)
                 self._stack.setCurrentWidget(self.stage)
                 self.lbl_info.setText(
                     'Playing in the pop-out window (1:1) — transport '
                     'below still controls it.')
-            elif self.stage.scene:
-                self.popout.lock_size(self.stage.scene.canvas_w,
-                                      self.stage.scene.canvas_h)
-                self.popout.stage.matte_ar = self.stage.matte_ar
-                self.popout.stage.bg_color = self.stage.bg_color
-                self.popout.stage.set_scene(self.stage.scene)
-            self.popout.show()
+            elif self._player_active():
+                # Qt backend: the view widget moves over intact
+                self._popped_player = True
+                self._stack.removeWidget(self.player_view)
+                self.popout.set_content(self.player_view)
+                self.popout.lock_size(*self._canvas_size())
+                self._stack.setCurrentWidget(self.stage)
+                self.popout.show()
+                self.lbl_info.setText(
+                    'Playing in the pop-out window (1:1) — transport '
+                    'below still controls it.')
+            else:
+                if self.stage.scene:
+                    self.popout.lock_size(self.stage.scene.canvas_w,
+                                          self.stage.scene.canvas_h)
+                    self.popout.stage.matte_ar = self.stage.matte_ar
+                    self.popout.stage.bg_color = self.stage.bg_color
+                    self.popout.stage.set_scene(self.stage.scene)
+                self.popout.show()
             self.btn_popout.setText('Close pop-out')
             # keep the stills scene fresh (frame extraction for stills popout)
             self._debounce.start()
         else:
             self.popout.close()
 
+    def _respawn_mpv(self, into_popout: bool):
+        """Tear down the mpv engine and bring it back inside the pop-out
+        (or the main stack), restoring position and pause state."""
+        pos, paused = 0.0, True
+        if self._mpv is not None:
+            pos = self._mpv.position_ms()
+            paused = self._mpv.is_paused()
+            old = self._mpv
+            old.shutdown()
+            if old.parent() is not None:
+                if self.popout is not None and \
+                        self.popout._external is old:
+                    self.popout.release_content()
+                else:
+                    self._stack.removeWidget(old)
+            old.setParent(None)
+            old.deleteLater()
+            self._mpv = None
+        w = MpvPlayerWidget()
+        if into_popout and self.popout is not None:
+            self.popout.set_content(w)
+        else:
+            self._stack.addWidget(w)
+            self._stack.setCurrentWidget(w)
+        if not w.start():
+            w.deleteLater()
+            self._mpv_failed = True
+            self._mpv_load_failed('mpv restart failed')
+            return
+        self._wire_mpv(w)
+        self._mpv = w
+        w.set_mute(self.chk_mute.isChecked())
+        if self.stage.scene:
+            w.set_canvas(self.stage.scene.canvas_w,
+                         self.stage.scene.canvas_h,
+                         self.stage.scene.content)
+        if self.video_path:
+            w.load(self.video_path)
+            w.seek_ms(pos)
+            w.set_pause(paused)
+        self._update_overlays(pos, force=True)
+
     def _popout_closed(self):
         if self._popped_player and self.popout is not None:
-            w = self.popout.release_content()
-            if w is not None:
-                self._stack.addWidget(self.player_view)
-            if self._player_active():
-                self._stack.setCurrentWidget(self.player_view)
+            if self._backend == 'mpv':
+                self._respawn_mpv(into_popout=False)
+            else:
+                w = self.popout.release_content()
+                if w is not None:
+                    self._stack.addWidget(self.player_view)
+                if self._player_active():
+                    self._stack.setCurrentWidget(self.player_view)
             self._popped_player = False
         self.popout = None
         self.btn_popout.setText('Pop out (1:1)')
+
+    def shutdown_players(self):
+        """Called on app close: stop engines cleanly."""
+        if self._mpv is not None:
+            self._mpv.shutdown()
+        if self._player is not None:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
 
     def _open_player_menu(self):
         menu = QMenu(self)

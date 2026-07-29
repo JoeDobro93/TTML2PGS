@@ -962,6 +962,61 @@ class TestPipelineAndQueue(unittest.TestCase):
                                    '/tmp/a b.mkv', 61500)
         self.assertEqual(cmd, ['vlc', '--start-time=61.500', '/tmp/a b.mkv'])
 
+    def test_mpv_overlay_conversion(self):
+        try:
+            from ttml2pgs.ui.widgets.mpv_player import _to_bgra_scaled
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        import numpy as np
+        rgba = np.zeros((20, 40, 4), np.uint8)
+        rgba[..., 0] = 200                      # R
+        rgba[..., 3] = 128                      # 50% alpha
+        out = _to_bgra_scaled(rgba, 80, 40)
+        self.assertEqual(out.shape, (40, 80, 4))
+        self.assertTrue(out.flags['C_CONTIGUOUS'])
+        # premultiplied: R lands in BGRA[2] at ~200*0.5
+        self.assertLessEqual(abs(int(out[20, 40, 2]) - 100), 2)
+        self.assertLessEqual(abs(int(out[20, 40, 3]) - 128), 1)
+
+    def test_mpv_engine_commands(self):
+        """Exact command forms the embedded mpv widget issues (headless
+        vo=null): load, exact seek, overlay-add/remove."""
+        try:
+            from ttml2pgs.ui.widgets.mpv_player import mpv_available
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        if not mpv_available():
+            self.skipTest('libmpv not installed')
+        import shutil
+        if not shutil.which('ffmpeg'):
+            self.skipTest('ffmpeg not available')
+        import subprocess
+        import numpy as np
+        import mpv as mpvmod
+        with tempfile.TemporaryDirectory() as td:
+            vid = os.path.join(td, 't.mp4')
+            subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi',
+                            '-i', 'testsrc2=size=160x90:rate=24:duration=2',
+                            '-pix_fmt', 'yuv420p', vid], check=True)
+            m = mpvmod.MPV(vo='null', ao='null', pause=True,
+                           keep_open='yes')
+            try:
+                m.loadfile(vid)
+                deadline = time.time() + 20
+                while not m.duration and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertAlmostEqual(float(m.duration), 2.0, delta=0.2)
+                m.command('seek', 1.0, 'absolute+exact')
+                time.sleep(0.4)
+                self.assertAlmostEqual(float(m.time_pos), 1.0, delta=0.3)
+                arr = np.ascontiguousarray(
+                    np.full((30, 60, 4), 128, np.uint8))
+                m.overlay_add(1, 10, 20, '&' + str(arr.ctypes.data), 0,
+                              'bgra', 60, 30, 240)
+                m.overlay_remove(1)
+            finally:
+                m.terminate()
+
     def test_ruby_preview_text_has_parens(self):
         try:
             from ttml2pgs.ui.widgets.cue_table import preview_text

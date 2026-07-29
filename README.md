@@ -26,7 +26,10 @@ python -m ttml2pgs preview sub.ttml -n 5 -o out/   # cue PNGs
 ```
 
 `ffmpeg`/`ffprobe` (probing, preview frames) and `mkvmerge` (remuxing)
-should be on PATH.
+should be on PATH. For the embedded preview player, install **libmpv**
+(`libmpv2`/`mpv` package on Linux; `libmpv-2.dll` on Windows, folder
+configurable in Settings) — it gives HDR-correct playback; without it
+the preview falls back to Qt Multimedia.
 
 ## What v2 does
 
@@ -135,10 +138,14 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
 * **Cue pane** — filter by text/region, edit times/region/text inline,
   add/duplicate/delete cues, enable checkboxes, and Time tools (shift
   all/selected/after; manual fps conform with explained presets).
-* **Preview** — an **embedded video player** (SubtitleEdit-style,
-  QtMultimedia): plays the bound video with live subtitle overlays kept
-  in sync — overlapping cues included, rendered by the same engine that
-  feeds the .sup. Selecting a cue seeks to its first frame, paused.
+* **Preview** — an **embedded video player** (SubtitleEdit-style):
+  plays the bound video with live subtitle overlays kept in sync —
+  overlapping cues included, rendered by the same engine that feeds the
+  .sup. Uses **mpv (libmpv)** when installed — correct HDR→SDR tone
+  mapping, wide codec support, hardware decode — with QtMultimedia as
+  the automatic fallback (Linux: `apt install libmpv2`; Windows: drop
+  `libmpv-2.dll` in a folder and set it under Settings → Player
+  engine). Selecting a cue seeks to its first frame, paused.
   Falls back automatically to stills mode (matte AR guides + ffmpeg
   frame extraction with HDR tone-map) when the platform lacks a codec.
   **Show regions** outlines every region with its name in distinct

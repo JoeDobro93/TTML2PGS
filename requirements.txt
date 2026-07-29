@@ -8,6 +8,13 @@ fonttools>=4.47
 # GUI
 PyQt6>=6.6
 
+# Embedded preview player engine (recommended): needs the libmpv shared
+# library at runtime — Linux: apt install libmpv2 / mpv; Windows: put
+# libmpv-2.dll (from an mpv dev build) in a folder and point Settings →
+# Player engine → "libmpv folder" at it. Without libmpv the preview
+# falls back to Qt Multimedia (no HDR tone mapping).
+python-mpv>=1.0.5
+
 # Runtime tools expected on PATH (not pip):
 #   ffmpeg/ffprobe  – video probing, preview frames, mux fallback
 #   mkvmerge        – preferred remuxer (MKVToolNix)
