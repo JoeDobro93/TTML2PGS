@@ -1574,5 +1574,226 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(preview_text(srt_doc, cue), cue.plain_text())
 
 
+class TestDefaultProfiles(unittest.TestCase):
+    """Round 12: fallback profiles — 'the initials if no initials are
+    set'. They fill only the gaps the file leaves open."""
+
+    def _plain_doc(self, lang='ja'):
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 'p.vtt')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write('WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n'
+                        'こんにちは世界\n')
+            doc = load_subtitle(p)
+        doc.language = lang
+        for c in doc.cues:
+            c.lang = lang
+        return doc
+
+    def test_profile_fills_only_gaps(self):
+        doc = self._plain_doc()
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        base = CueRenderer(doc, canvas).render_cue(doc.cues[0])
+
+        ov = OverrideSet()
+        ov.profiles[''] = Style(id='__profile__', font_size=Dim(9.0, 'vh'))
+        big = CueRenderer(doc, canvas, ov).render_cue(doc.cues[0])
+        self.assertGreater(big.height, base.height * 1.5,
+                           'profile font size must apply to a bare file')
+
+        # a document that DOES set an initial font size wins over the
+        # profile: with-profile and without-profile renders are identical
+        doc.initial.font_size = Dim(4.5, 'vh')
+        a = CueRenderer(doc, canvas).render_cue(doc.cues[0])
+        b = CueRenderer(doc, canvas, ov).render_cue(doc.cues[0])
+        self.assertEqual((a.width, a.height), (b.width, b.height))
+        self.assertTrue(np.array_equal(a.bitmap, b.bitmap))
+
+    def test_profile_color_below_file_styles(self):
+        doc = self._plain_doc()
+        ov = OverrideSet()
+        ov.profiles[''] = Style(id='__profile__',
+                                color=(255, 255, 0, 255))
+        computed = doc.resolve_style([([], None)], None,
+                                     fallback=ov.profile_for('ja'))
+        self.assertEqual(computed.color, (255, 255, 0, 255))
+        # an explicit initial color beats the profile
+        doc.initial.color = (0, 255, 0, 255)
+        computed = doc.resolve_style([([], None)], None,
+                                     fallback=ov.profile_for('ja'))
+        self.assertEqual(computed.color, (0, 255, 0, 255))
+
+    def test_language_profile_replaces_default(self):
+        doc = self._plain_doc('ja')
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        both = OverrideSet()
+        both.profiles[''] = Style(id='__profile__', font_size=Dim(2, 'vh'))
+        both.profiles['ja'] = Style(id='__profile__',
+                                    font_size=Dim(9, 'vh'))
+        only_ja = OverrideSet()
+        only_ja.profiles['ja'] = Style(id='__profile__',
+                                       font_size=Dim(9, 'vh'))
+        a = CueRenderer(doc, canvas, both).render_cue(doc.cues[0])
+        b = CueRenderer(doc, canvas, only_ja).render_cue(doc.cues[0])
+        self.assertTrue(np.array_equal(a.bitmap, b.bitmap),
+                        'ja profile must be used INSTEAD of Default')
+        # region-tag match: ja-JP falls back to the ja profile
+        self.assertIs(both.profile_for('ja-JP'), both.profiles['ja'])
+
+    def test_empty_profile_neither_shadows_nor_persists(self):
+        ov = OverrideSet()
+        ov.profiles[''] = Style(id='__profile__',
+                                font_size=Dim(6, 'vh'))
+        ov.profiles['ja'] = Style(id='__profile__')   # nothing set
+        self.assertIs(ov.profile_for('ja'), ov.profiles[''],
+                      'empty language profile must not shadow Default')
+        d = ov.to_dict()
+        self.assertNotIn('ja', d['profiles'])
+        self.assertIn('', d['profiles'])
+
+    def test_profiles_serialization_roundtrip(self):
+        ov = OverrideSet()
+        ov.profiles['ja'] = Style(id='__profile__',
+                                  font_family=['Yu Gothic Medium'],
+                                  font_size=Dim(5, 'vh'),
+                                  color=(200, 200, 200, 255))
+        ov2 = OverrideSet.from_dict(ov.to_dict())
+        p = ov2.profiles['ja']
+        self.assertEqual(p.font_family, ['Yu Gothic Medium'])
+        self.assertEqual((p.font_size.value, p.font_size.unit), (5, 'vh'))
+        self.assertEqual(p.color, (200, 200, 200, 255))
+
+
+class TestMediumSibling(unittest.TestCase):
+    def test_author_named_family_gets_medium_sibling(self):
+        """Files often name the Regular family ('Noto Sans JP') while the
+        heavier face is installed under '… Medium'. At CJK normal weight
+        the sibling must be found; bold and Latin must not hunt for it."""
+        from ttml2pgs.core.fonts import FaceRecord, FontManager, _norm_family
+        fm = FontManager()
+        recs = [
+            FaceRecord(path='/fake/noto-r.otf', index=0,
+                       families=['Noto Sans JP'], weight=400),
+            FaceRecord(path='/fake/noto-m.otf', index=0,
+                       families=['Noto Sans JP Medium'], weight=500),
+        ]
+        fm.records = recs
+        for r in recs:
+            for fam in r.families:
+                fm.by_family.setdefault(_norm_family(fam), []).append(r)
+        ja = fm.resolve_stack(['Noto Sans JP'], lang='ja')
+        self.assertEqual(ja[0].weight, 500,
+                         'Medium sibling must lead for author-named CJK')
+        en = fm.resolve_stack(['Noto Sans JP'], lang='en')
+        self.assertEqual(en[0].weight, 400)
+        bold = fm.resolve_stack(['Noto Sans JP'], lang='ja', weight='bold')
+        self.assertEqual(bold[0].weight, 400,
+                         'bold keeps the named family (synth bold)')
+
+
+class TestParallelRender(unittest.TestCase):
+    def _many_cue_doc(self, td, n=20):
+        lines = ['WEBVTT', '']
+        for i in range(n):
+            t0, t1 = i * 2, i * 2 + 1
+            lines.append(f'00:00:{t0:02d}.000 --> 00:00:{t1:02d}.500')
+            lines.append(f'Cue number {i} — some text to raster')
+            lines.append('')
+        p = os.path.join(td, 'many.vtt')
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        return load_subtitle(p)
+
+    def test_parallel_matches_sequential_bytes(self):
+        """workers=2 must produce a byte-identical .sup to workers=1
+        (cue rendering is pure; assembly is in cue order)."""
+        from ttml2pgs.core.pipeline import MIN_PARALLEL_CUES
+        with tempfile.TemporaryDirectory() as td:
+            doc = self._many_cue_doc(td)
+            self.assertGreaterEqual(len(doc.cues), MIN_PARALLEL_CUES)
+            out_seq = os.path.join(td, 'seq.sup')
+            out_par = os.path.join(td, 'par.sup')
+            RenderPipeline(doc, RenderSettings(out_path=out_seq,
+                                               workers=1)).run()
+            RenderPipeline(doc, RenderSettings(out_path=out_par,
+                                               workers=2)).run()
+            with open(out_seq, 'rb') as f:
+                seq = f.read()
+            with open(out_par, 'rb') as f:
+                par = f.read()
+            self.assertGreater(len(seq), 500)
+            self.assertEqual(seq, par)
+
+    def test_small_jobs_stay_sequential(self):
+        """Below MIN_PARALLEL_CUES the pool is skipped (worker startup
+        would dominate) — the job must still complete."""
+        with tempfile.TemporaryDirectory() as td:
+            doc = self._many_cue_doc(td, n=3)
+            out = os.path.join(td, 'o.sup')
+            pipe = RenderPipeline(doc, RenderSettings(out_path=out,
+                                                      workers=8))
+            self.assertEqual(pipe.run(), out)
+            self.assertGreater(os.path.getsize(out), 500)
+
+    def test_workers_serialization(self):
+        rs = RenderSettings(out_path='x.sup', workers=4)
+        rs2 = RenderSettings.from_dict(rs.to_dict())
+        self.assertEqual(rs2.workers, 4)
+        self.assertEqual(RenderSettings.from_dict({'out_path': 'y'}).workers,
+                         0)
+
+
+class TestPreferencesDialog(unittest.TestCase):
+    def test_preferences_dialog_offscreen(self):
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.preferences import PreferencesDialog
+
+        ov = OverrideSet()
+        settings = {'render_workers': 0, 'player_engine': 'auto'}
+        dlg = PreferencesDialog(ov, settings)
+
+        # Default profile row exists, selected, not removable
+        self.assertEqual(dlg.profile_list.count(), 1)
+        self.assertEqual(dlg.profile_list.item(0).text(), 'Default')
+        self.assertFalse(dlg.btn_del_profile.isEnabled())
+
+        # editing the editor writes into overrides.profiles['']
+        changed = []
+        dlg.profiles_changed.connect(lambda: changed.append(1))
+        ed = dlg.profile_editor
+        ed.c_size.setChecked(True)
+        self.assertIsNotNone(ov.profiles[''].font_size)
+        self.assertTrue(changed)
+
+        # language profile add (programmatic path) + removable
+        ov.profiles.setdefault('ja', Style(id='__profile__'))
+        dlg._reload_profiles(select='ja')
+        item = dlg.profile_list.currentItem()
+        self.assertEqual(item.text(), 'ja')
+        self.assertTrue(dlg.btn_del_profile.isEnabled())
+        dlg._del_profile()
+        self.assertNotIn('ja', ov.profiles)
+
+        # performance tab writes render_workers
+        dlg.spin_workers.setValue(3)
+        self.assertEqual(settings['render_workers'], 3)
+
+        # player tab writes engine choice
+        dlg.cmb_engine.setCurrentIndex(1)
+        self.assertEqual(settings['player_engine'], 'qt')
+
+        # close prunes empty profiles (Default stays only if non-empty)
+        ov.profiles.setdefault('zh', Style(id='__profile__'))
+        dlg.close()
+        self.assertNotIn('zh', ov.profiles)
+        self.assertIn('', ov.profiles)          # has font_size set
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

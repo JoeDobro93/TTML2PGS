@@ -27,6 +27,7 @@ from ..core.exporters import export_srt, export_ttml, export_vtt
 from ..core.jobqueue import QueueManager
 from ..core.pipeline import RenderSettings
 from ..core.project import save_project
+from .preferences import PreferencesDialog
 from .state import AppState, DocumentSession
 from .widgets.cue_editor import SelectedCuePane
 from .widgets.cue_table import CuePane
@@ -166,8 +167,26 @@ class MainWindow(QMainWindow):
         act(m_render, '&Pause queue', self.queue.pause_all)
         act(m_render, '&Resume queue', self.queue.resume_all)
 
+        # top-level menu-bar button (not a drop-down)
+        a_pref = QAction('&Preferences', self)
+        a_pref.setShortcut(QKeySequence('Ctrl+,'))
+        a_pref.triggered.connect(self._show_preferences)
+        self.menuBar().addAction(a_pref)
+
         m_help = self.menuBar().addMenu('&Help')
         act(m_help, '&About', self._about)
+
+    # ------------------------------------------------------------------ #
+    def _show_preferences(self):
+        if getattr(self, '_pref_dialog', None) is None:
+            dlg = PreferencesDialog(self.state.overrides,
+                                    self.state.settings, parent=self)
+            dlg.profiles_changed.connect(self._overrides_edited)
+            dlg.settings_changed.connect(self.state.save_settings)
+            self._pref_dialog = dlg
+        self._pref_dialog.show()
+        self._pref_dialog.raise_()
+        self._pref_dialog.activateWindow()
 
     # ------------------------------------------------------------------ #
     # Session handling
@@ -302,7 +321,8 @@ class MainWindow(QMainWindow):
             retime=sess.retime_plan(),
             offset_ms=sess.offset_ms,
             selected_only=self.sources_pane.selected_cues_only(),
-            is_hdr=bool(sess.video_info and sess.video_info.is_hdr))
+            is_hdr=bool(sess.video_info and sess.video_info.is_hdr),
+            workers=int(self.state.settings.get('render_workers', 0) or 0))
         # snapshot doc + overrides so later edits don't affect queued work
         doc_snapshot = copy.deepcopy(sess.doc)
         ov_snapshot = copy.deepcopy(self.state.overrides)

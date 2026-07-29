@@ -164,8 +164,8 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   .sup. Uses **mpv (libmpv)** when installed — correct HDR→SDR tone
   mapping, wide codec support, hardware decode — with QtMultimedia as
   the automatic fallback (Linux: `apt install libmpv2`; Windows: drop
-  `libmpv-2.dll` in a folder and set it under Settings → Player
-  engine). Selecting a cue seeks to its first frame, paused.
+  `libmpv-2.dll` in a folder and set it under Preferences → Player).
+  Selecting a cue seeks to its first frame, paused.
   Falls back automatically to stills mode (matte AR guides + ffmpeg
   frame extraction with HDR tone-map) when the platform lacks a codec.
   **Show regions** outlines every region with its name in distinct
@@ -186,6 +186,17 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   region positions only and **never scales text**), post-processing
   toggles, and live **Styles / Regions / Initial** editors with
   add/rename/delete (renames cascade through every cue reference).
+* **Preferences window** (menu bar → Preferences, `Ctrl+,`) —
+  * **Default profiles**: fallback "initials" per language — applied
+    only where the subtitle file specifies nothing at all (no inline
+    styling, no named styles, no initials), so a bare SRT gets your
+    chosen look while authored files stay untouched. The **Default**
+    profile covers every subtitle; add a **language profile** (`ja`,
+    `zh-Hant`…) and it is used *instead of* Default for files in that
+    language.
+  * **Player**: embedded engine (mpv / Qt Multimedia), libmpv folder,
+    external player exe + args.
+  * **Performance**: render worker processes (0 = auto).
 * **Save/Load** native `.t2p` projects (lossless document + overrides +
   bindings); export TTML / WebVTT / SRT (lossy where the target format
   can't express a feature).
@@ -206,14 +217,14 @@ ttml2pgs/
     renderer.py         canvas/region resolution, cascade → pixels
     pgs.py              overlap timeline + SUP writer
     overrides.py        per-language override sets + layout options
-    pipeline.py         doc → .sup orchestration (pause/cancel/resume)
+    pipeline.py         doc → .sup orchestration (parallel, pause/cancel/resume)
     jobqueue.py         video-grouped queue engine
     video.py            ffprobe, HDR detect, matching, remux
     exporters.py        TTML/VTT/SRT writers
     project.py          .t2p project format
   ui/                   PyQt6 app (panes described above)
 tests/
-  test_core.py          35 tests: parsers, layout, PGS bytes, queue, round-trips
+  test_core.py          96 tests: parsers, layout, PGS bytes, queue, round-trips
   samples/              TTML (ruby/vertical/emphasis), VTT (regions/styles), SRT
 ```
 
@@ -224,7 +235,8 @@ tests/
 * Embedded playback depends on platform codecs (Windows Media
   Foundation / GStreamer); files it can't decode automatically fall
   back to stills + external-player hand-off.
-* Rendering is single-process; a real 1372-cue Japanese feature (ruby,
-  vertical, shear) renders + encodes in under two minutes on a modest
-  CPU — several times the v1 Chrome pipeline; further parallelism is a
-  straightforward future optimization.
+* Cue rendering runs across a **process pool** by default (cores − 1,
+  cap 8; configurable under Preferences → Performance, `--workers` on
+  the CLI). Output is byte-identical to a single-process render; jobs
+  under 16 cues stay in-process since worker startup would dominate.
+  The remaining serial parts are PGS encode + mux.

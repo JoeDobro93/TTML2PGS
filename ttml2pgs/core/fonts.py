@@ -426,6 +426,11 @@ class FontManager:
                 if lk:
                     add(self._lang_classified(lk, w, italic))
             else:
+                # author-named CJK families: try the Medium sibling
+                # family first at normal weight (files say 'Noto Sans
+                # JP'; the installed Medium lives under '… Medium')
+                if w == 500 and not fl.endswith('medium'):
+                    add(self._lookup_family(f + ' Medium', w, italic))
                 add(self._lookup_family(f, w, italic))
 
         # language fallback after the explicit list

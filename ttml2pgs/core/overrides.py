@@ -181,6 +181,21 @@ class OverrideSet:
     def __init__(self):
         self.layout = LayoutOptions()
         self.by_lang: Dict[str, StyleOverrides] = {'': StyleOverrides()}
+        #: default profiles — fallback "initials" applied only where the
+        #: subtitle file specifies nothing at all. Key '' = the Default
+        #: profile; language keys win over it for matching subtitles.
+        self.profiles: Dict[str, Style] = {}
+
+    def profile_for(self, lang: str) -> Optional[Style]:
+        """First non-empty profile: exact lang → base lang → Default.
+        A profile with nothing set counts as absent (it must neither
+        shadow the Default profile nor pretend to exist)."""
+        lang = (lang or '').strip()
+        for key in (lang, lang.split('-')[0], ''):
+            p = self.profiles.get(key)
+            if p is not None and p.set_props():
+                return p
+        return None
 
     def for_language(self, lang: str) -> StyleOverrides:
         lang = (lang or '').strip()
@@ -200,13 +215,18 @@ class OverrideSet:
 
     # -- (de)serialization --------------------------------------------- #
     def to_dict(self) -> dict:
+        from .project import style_to_json
         return {
             'layout': self.layout.to_dict(),
             'languages': {k: v.to_dict() for k, v in self.by_lang.items()},
+            # empty profiles are editing leftovers, not state
+            'profiles': {k: style_to_json(v)
+                         for k, v in self.profiles.items() if v.set_props()},
         }
 
     @staticmethod
     def from_dict(d: dict) -> 'OverrideSet':
+        from .project import style_from_json
         os_ = OverrideSet()
         if not d:
             return os_
@@ -216,4 +236,6 @@ class OverrideSet:
             os_.by_lang = {k: StyleOverrides.from_dict(v)
                            for k, v in langs.items()}
             os_.by_lang.setdefault('', StyleOverrides())
+        os_.profiles = {k: style_from_json(v)
+                        for k, v in (d.get('profiles') or {}).items()}
         return os_

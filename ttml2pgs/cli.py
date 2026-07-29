@@ -49,6 +49,8 @@ def main(argv=None) -> int:
     p_r.add_argument('--lang', default=None, help='force language code')
     p_r.add_argument('--mux', action='store_true',
                      help='remux into --video when done')
+    p_r.add_argument('--workers', type=int, default=0,
+                     help='render processes (0 = auto, 1 = sequential)')
 
     p_c = sub.add_parser('convert', help='convert between text formats')
     p_c.add_argument('input')
@@ -135,7 +137,8 @@ def cmd_render(args) -> int:
         out = f"{base}.sup"
 
     settings = RenderSettings(out_path=out, video_res=video_res,
-                              target_fps=target_fps, retime=retime)
+                              target_fps=target_fps, retime=retime,
+                              workers=args.workers)
     pipe = RenderPipeline(doc, settings, overrides)
 
     t0 = time.time()

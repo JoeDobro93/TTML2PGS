@@ -175,6 +175,11 @@ class CueRenderer:
             font_size_px=font_px, parent_font_px=font_px)
 
     # ------------------------------------------------------------------ #
+    def _profile(self, lang: str) -> Optional[Style]:
+        """Default-profile fallback for a language (below doc initials)."""
+        return self.overrides.profile_for(lang or self.doc.language)
+
+    # ------------------------------------------------------------------ #
     def render_cue(self, cue: Cue) -> Optional[RenderedCue]:
         region = self.doc.get_region(cue)
         lang = cue.lang or self.doc.language
@@ -402,7 +407,9 @@ class CueRenderer:
             or root_ctx.cell_h()
 
         base_chain = [(cue.style_refs, cue.inline_style)]
-        para_computed = doc.resolve_style(base_chain, region, ov_style, lang)
+        para_computed = doc.resolve_style(base_chain, region, ov_style,
+                                          lang,
+                                          fallback=self._profile(lang))
 
         para = ParaStyle(
             text_align=para_computed.text_align,
@@ -412,9 +419,10 @@ class CueRenderer:
             wrap=para_computed.wrap,
             base_font_px=root_font)
 
-        # stepwise font chain: region/initial -> cue
+        # stepwise font chain: profile/region/initial -> cue
         font_px = self._own_font_px(doc, [], None, root_font,
-                                    initial=True, region=region)
+                                    initial=True, region=region,
+                                    profile=self._profile(lang))
         font_px = self._own_font_px(doc, cue.style_refs, cue.inline_style,
                                     font_px, override=ov_style
                                     if so.override_font_size else None)
@@ -429,10 +437,14 @@ class CueRenderer:
     def _own_font_px(self, doc: SubtitleDocument, refs, inline,
                      parent_px: float, initial: bool = False,
                      region: Optional[Region] = None,
-                     override: Optional[Style] = None) -> float:
+                     override: Optional[Style] = None,
+                     profile: Optional[Style] = None) -> float:
         """Resolve the font size specified *directly* on this node."""
         fs: Optional[Dim] = None
         if initial:
+            # profile fallback sits below the document's own initials
+            if profile is not None and profile.font_size is not None:
+                fs = profile.font_size
             # document initial + region-level font size
             if doc.initial.font_size is not None:
                 fs = doc.initial.font_size
@@ -464,7 +476,8 @@ class CueRenderer:
                 continue
             if child.kind == 'text':
                 computed = doc.resolve_style(state.chain, region, ov_style,
-                                             lang)
+                                             lang,
+                                             fallback=self._profile(lang))
                 rs = self._run_style(computed, state, lang, vertical)
                 items.append(TextItem(child.text, rs))
                 continue
@@ -479,7 +492,8 @@ class CueRenderer:
                 chain=state.chain + [(child.style_refs, child.inline_style)],
                 font_px=new_font, opacity=new_opacity)
             computed = doc.resolve_style(sub.chain, region, ov_style,
-                                         child_lang)
+                                         child_lang,
+                                         fallback=self._profile(child_lang))
 
             if computed.ruby == 'container':
                 item = self._build_ruby(child, sub, region, ov_style,
@@ -506,8 +520,9 @@ class CueRenderer:
         def collect(node, st: _WalkState, target: str):
             for ch in node.children:
                 if ch.kind == 'text':
-                    computed = doc.resolve_style(st.chain, region, ov_style,
-                                                 lang)
+                    computed = doc.resolve_style(st.chain, region,
+                                                 ov_style, lang,
+                                                 fallback=self._profile(lang))
                     rs = self._run_style(computed, st, lang, vertical)
                     (base_items if target == 'base' else ann_items).append(
                         TextItem(ch.text, rs))
@@ -519,7 +534,9 @@ class CueRenderer:
                     sub = _WalkState(
                         chain=st.chain + [(ch.style_refs, ch.inline_style)],
                         font_px=nf, opacity=st.opacity)
-                    comp = doc.resolve_style(sub.chain, region, ov_style, lang)
+                    comp = doc.resolve_style(sub.chain, region, ov_style,
+                                             lang,
+                                             fallback=self._profile(lang))
                     role = comp.ruby or ''
                     ntarget = target
                     if role in ('base', 'baseContainer'):

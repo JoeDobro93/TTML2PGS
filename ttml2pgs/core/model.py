@@ -554,7 +554,8 @@ class SubtitleDocument:
     def resolve_style(self, chain: List[Tuple[List[str], Optional[Style]]],
                       region: Optional[Region] = None,
                       overrides: Optional[Style] = None,
-                      language: str = '') -> ComputedStyle:
+                      language: str = '',
+                      fallback: Optional[Style] = None) -> ComputedStyle:
         """
         Compute the final style for a content node.
 
@@ -563,9 +564,15 @@ class SubtitleDocument:
         region   – the presentation region (root of the inheritance chain
                    for inherited props, per TTML §8.4.4.2).
         overrides– global override style applied on top of everything.
+        fallback – per-language default profile: fills in below the
+                   document's initials (used only where neither the file
+                   nor the initials say anything).
         """
-        # Base: system defaults <- document initial
-        spec = self.initial.merged_over(system_default_style(language or self.language))
+        # Base: system defaults <- profile fallback <- document initial
+        base = system_default_style(language or self.language)
+        if fallback is not None:
+            base = fallback.merged_over(base)
+        spec = self.initial.merged_over(base)
         # Region styles participate as the outermost ancestor.
         if region is not None:
             reg_spec = self.specified_style(region.style_refs, region.style)

@@ -1039,41 +1039,7 @@ class SettingsPane(QWidget):
         ovl.addWidget(CollapsibleSection('Post-processing', post,
                                          expanded=False))
 
-        player = QWidget()
-        fl = QFormLayout(player)
-        fl.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapLongRows)
-        fl.setContentsMargins(18, 2, 4, 6)
-        self.cmb_engine = QComboBox()
-        self.cmb_engine.addItems([
-            'Auto — mpv when available (HDR-correct)',
-            'Qt Multimedia only'])
-        self.cmb_engine.setCurrentIndex(
-            1 if app_settings.get('player_engine', 'auto') == 'qt' else 0)
-        self.cmb_engine.setToolTip(
-            'Engine for the EMBEDDED preview player. mpv (libmpv) '
-            'tone-maps HDR correctly and decodes almost anything — '
-            'install mpv, or on Windows drop libmpv-2.dll into the '
-            'folder below. Qt Multimedia is the fallback (no HDR tone '
-            'mapping).')
-        compact(self.cmb_engine)
-        fl.addRow('Embedded engine:', self.cmb_engine)
-        self.ed_mpv_dir = QLineEdit(app_settings.get('mpv_dll_dir', ''))
-        self.ed_mpv_dir.setPlaceholderText(
-            r'folder containing libmpv-2.dll (Windows only)')
-        fl.addRow('libmpv folder:', self.ed_mpv_dir)
-        self.ed_player = QLineEdit(app_settings.get('external_player', ''))
-        self.ed_player.setPlaceholderText(r'e.g. C:\Program Files\MPC-BE\mpc-be64.exe')
-        self.ed_player_args = QLineEdit(
-            app_settings.get('external_player_args', '"{file}" /start {ms}'))
-        fl.addRow('External exe:', self.ed_player)
-        fl.addRow('Arguments:', self.ed_player_args)
-        self.cmb_engine.currentIndexChanged.connect(self._post_changed)
-        self.ed_mpv_dir.editingFinished.connect(self._post_changed)
-        self.ed_player.editingFinished.connect(self._post_changed)
-        self.ed_player_args.editingFinished.connect(self._post_changed)
-        ovl.addWidget(CollapsibleSection('Player engine / external player',
-                                         player, expanded=False))
+        # (player engine / external player settings live in Preferences)
         ovl.addStretch()
 
         scroll = QScrollArea()
@@ -1156,12 +1122,6 @@ class SettingsPane(QWidget):
         self.app_settings['remux_after_render'] = self.chk_remux.isChecked()
         self.app_settings['replace_original'] = self.chk_replace.isChecked()
         self.app_settings['move_to_subs_folder'] = self.chk_move.isChecked()
-        self.app_settings['external_player'] = self.ed_player.text().strip()
-        self.app_settings['external_player_args'] = \
-            self.ed_player_args.text().strip()
-        self.app_settings['player_engine'] = \
-            'qt' if self.cmb_engine.currentIndex() == 1 else 'auto'
-        self.app_settings['mpv_dll_dir'] = self.ed_mpv_dir.text().strip()
         self.overrides_changed.emit()
 
     # -- language tabs -------------------------------------------------- #

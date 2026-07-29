@@ -102,8 +102,11 @@ class AppState:
             'move_to_subs_folder': False,
             'external_player': '',
             'external_player_args': '"{file}" /start {ms}',
+            'player_engine': 'auto',
+            'mpv_dll_dir': '',
             'preview_bg': '#B0C4DE',       # v1's LightSteelBlue matte
             'restore_session': True,
+            'render_workers': 0,           # 0 = auto (cores-1, cap 8)
         }
         self._settings_path = os.path.join(config_dir(), 'settings.json')
         self._session_path = os.path.join(config_dir(), 'session.json')
