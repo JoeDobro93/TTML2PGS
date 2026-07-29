@@ -595,7 +595,8 @@ class CueRenderer:
             rs.emphasis_position = computed.text_emphasis_position or 'before'
         rs.faces = self.fm.resolve_stack(
             computed.font_family, lang=lang,
-            weight='bold' if rs.bold else 'normal', italic=rs.italic)
+            weight='bold' if rs.bold else 'normal', italic=rs.italic,
+            preferred=self.overrides.for_language(lang).default_font)
         return rs
 
 

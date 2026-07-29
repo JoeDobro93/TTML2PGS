@@ -354,15 +354,21 @@ class FontManager:
         return sorted(found, key=lambda r: self._score(r, weight, italic))
 
     def resolve_stack(self, families: Sequence[str], lang: str = '',
-                      weight: str = 'normal', italic: bool = False
-                      ) -> List[FaceRecord]:
+                      weight: str = 'normal', italic: bool = False,
+                      preferred: str = '') -> List[FaceRecord]:
         """
         Turn a requested family list + language into an ordered candidate
         face list (deduplicated). This is the core selection routine.
+
+        ``preferred`` — the user's per-language default font. It heads
+        the resolution of generic families (sans-serif etc.) and the
+        fallback chain, but never displaces a specific family the
+        subtitle author asked for.
         """
         w = 700 if str(weight) in ('bold', '700', '800', '900') else 400
         lk = _lang_key(lang)
-        key = (tuple(families), lk, w, italic)
+        preferred = (preferred or '').strip()
+        key = (tuple(families), lk, w, italic, preferred)
         cached = self._resolve_cache.get(key)
         if cached is not None:
             return cached
@@ -376,13 +382,18 @@ class FontManager:
                     seen.add(r.key())
                     ordered.append(r)
 
+        def add_preferred():
+            if preferred:
+                add(self._lookup_family(preferred, w, italic))
+
         for fam in families:
             f = fam.strip()
             if not f:
                 continue
             fl = f.lower()
             if fl in _GENERIC or fl == 'japanese':
-                # generic → language default stack (CJK aware)
+                # generic → user default, then language stack (CJK aware)
+                add_preferred()
                 for name in _LANG_DEFAULT_STACKS.get(lk, []) + \
                         _LANG_DEFAULT_STACKS['']:
                     add(self._lookup_family(name, w, italic))
@@ -392,6 +403,7 @@ class FontManager:
                 add(self._lookup_family(f, w, italic))
 
         # language fallback after the explicit list
+        add_preferred()
         if lk:
             for name in _LANG_DEFAULT_STACKS.get(lk, []):
                 add(self._lookup_family(name, w, italic))

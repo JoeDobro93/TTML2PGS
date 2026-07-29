@@ -828,6 +828,81 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertTrue(q2.groups[0].render_jobs[0].started)
             self.assertFalse(q2.groups[1].render_jobs[0].started)
 
+    def test_video_match_streaming_names(self):
+        """v1 matched on the first dot-token; names like
+        id.jajp.Dialog.Subtitle.ttml must find id.mkv again."""
+        from ttml2pgs.core.video import find_matching_video, subtitle_stem
+        with tempfile.TemporaryDirectory() as td:
+            sub = os.path.join(td, 'd1758520-_____.jajp.Dialog.Subtitle.ttml')
+            vid = os.path.join(td, 'd1758520-_____.mkv')
+            open(sub, 'w').close()
+            open(vid, 'wb').close()
+            self.assertEqual(find_matching_video(sub),
+                             os.path.normpath(vid))
+        # ordinary names still match on the full stripped stem
+        with tempfile.TemporaryDirectory() as td:
+            sub = os.path.join(td, 'Show.S01E01.ja.forced.ttml')
+            vid = os.path.join(td, 'Show.S01E01.mkv')
+            other = os.path.join(td, 'Show.S01E02.mkv')
+            open(sub, 'w').close()
+            open(vid, 'wb').close()
+            open(other, 'wb').close()
+            self.assertEqual(subtitle_stem(sub), 'Show.S01E01')
+            self.assertEqual(find_matching_video(sub),
+                             os.path.normpath(vid))
+
+    def test_compact_language_tokens(self):
+        from ttml2pgs.core.parsers import (detect_language_from_filename,
+                                           normalize_language)
+        self.assertEqual(
+            detect_language_from_filename('x.jajp.Dialog.Subtitle.ttml'),
+            'ja')
+        self.assertEqual(detect_language_from_filename('x.enus.srt'), 'en')
+        self.assertEqual(normalize_language('jajp'), 'ja')
+
+    def test_vertical_shear_center_origin(self):
+        """Sheared upright-vertical glyphs must shear about their center:
+        GlyphBitmap.dy cancels the width-dependent column displacement."""
+        import math
+        from ttml2pgs.core.fonts import FontManager
+        from ttml2pgs.core.layout import RunStyle, PlacedGlyph
+        from ttml2pgs.core.raster import _glyph_cache
+        fm = FontManager.instance()
+        faces = fm.resolve_stack(['sans-serif'], lang='ja')
+        rec = fm.face_covering(faces, '国')
+        self.assertIsNotNone(rec, 'no ja font with 国 available')
+        gid = fm.ft_face(rec.path, rec.index).get_char_index(ord('国'))
+
+        def render(shear, axis='y', rot90=False):
+            st = RunStyle(shear_deg=shear, shear_axis=axis)
+            g = PlacedGlyph(face=rec, gid=gid, x=0, y=0, font_px=48.0,
+                            style=st, rot90=rot90)
+            return _glyph_cache.get(g, 0.0)
+
+        sheared = render(15.0)
+        self.assertIsNotNone(sheared)
+        t = math.tan(math.radians(15.0))
+        expect = t * (sheared.left + sheared.alpha.shape[1] / 2.0)
+        self.assertAlmostEqual(sheared.dy, expect, places=3)
+        self.assertGreater(sheared.dy, 1.0)     # meaningful correction
+        # no correction without shear, and none for horizontal italics
+        self.assertEqual(render(0.0).dy, 0.0)
+        self.assertEqual(render(15.0, axis='x').dy, 0.0)
+
+    def test_preferred_default_font(self):
+        from ttml2pgs.core.fonts import FontManager
+        fm = FontManager.instance()
+        stack = fm.resolve_stack(['sans-serif'], lang='ja',
+                                 preferred='WenQuanYi Zen Hei')
+        if not stack:
+            self.skipTest('no fonts installed')
+        names = ' '.join(stack[0].families).lower()
+        if not any('wenquanyi' in ' '.join(r.families).lower()
+                   for r in stack):
+            self.skipTest('WenQuanYi not installed')
+        self.assertIn('wenquanyi', names,
+                      'preferred font must head the generic resolution')
+
     def test_rename_style_cascades(self):
         doc = load_subtitle(sample('netflix_ja.ttml'))
         # find a style actually referenced by a cue

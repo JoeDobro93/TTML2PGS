@@ -15,14 +15,14 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (QCheckBox, QColorDialog, QComboBox,
-                             QDoubleSpinBox, QFormLayout, QGroupBox,
-                             QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-                             QListWidget, QPushButton, QScrollArea,
-                             QSizePolicy, QSplitter, QTabWidget,
-                             QToolButton, QVBoxLayout, QWidget)
+                             QCompleter, QDoubleSpinBox, QFormLayout,
+                             QGroupBox, QHBoxLayout, QInputDialog, QLabel,
+                             QLineEdit, QListWidget, QPushButton,
+                             QScrollArea, QSizePolicy, QSplitter,
+                             QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from ...core.colors import parse_color, to_hex
 from ...core.model import Region, Shadow, Style, SubtitleDocument
@@ -33,6 +33,39 @@ from ...core.units import Dim
 # --------------------------------------------------------------------------- #
 # small reusable editors
 # --------------------------------------------------------------------------- #
+
+class _NoWheelFilter(QObject):
+    """Swallow wheel events on unfocused widgets so scrolling the pane
+    never accidentally edits a spinbox/combo the cursor passes over."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Wheel and not obj.hasFocus():
+            ev.ignore()
+            return True
+        return False
+
+
+_no_wheel_filter = _NoWheelFilter()
+
+
+def guard_wheel(*widgets):
+    for w in widgets:
+        w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        w.installEventFilter(_no_wheel_filter)
+
+
+def guard_wheel_children(root: QWidget):
+    guard_wheel(*root.findChildren(QDoubleSpinBox),
+                *root.findChildren(QComboBox))
+
+
+def _installed_families() -> list:
+    try:
+        from ...core.fonts import FontManager
+        return FontManager.instance().families_available()
+    except Exception:                                  # pragma: no cover
+        return []
+
 
 class CollapsibleSection(QWidget):
     """A ▸/▾ header button + content. All sections share the pane's single
@@ -117,10 +150,19 @@ class DimEdit(QWidget):
         self.spin.setRange(-10000, 10000)
         self.spin.setDecimals(3)
         self.spin.setSingleStep(0.25)
+        # compact: allow shrinking well below the default hint so stacked
+        # editors never force a horizontal scrollbar
+        self.spin.setMinimumWidth(52)
+        self.spin.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                QSizePolicy.Policy.Fixed)
         self.cmb = QComboBox()
         self.cmb.addItems(units or self.UNITS)
+        self.cmb.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.cmb.setMinimumContentsLength(2)
         lay.addWidget(self.spin, 1)
         lay.addWidget(self.cmb)
+        guard_wheel(self.spin, self.cmb)
         self.set_dim(dim)
         self.spin.valueChanged.connect(lambda *_: self.changed.emit())
         self.cmb.currentTextChanged.connect(lambda *_: self.changed.emit())
@@ -220,22 +262,59 @@ class OverrideEditor(QWidget):
         lay.setContentsMargins(6, 4, 6, 4)
         lay.setSpacing(2)
 
-        def section(title, expanded=True):
-            content = QWidget()
-            form = QFormLayout(content)
-            form.setContentsMargins(18, 2, 4, 6)
-            form.setVerticalSpacing(4)
-            lay.addWidget(CollapsibleSection(title, content, expanded))
-            return form
+        # ONE collapsible box (like Layout/canvas) holding every text
+        # override, with mini headers — collapsing it leaves no scattered
+        # dead space.
+        content = QWidget()
+        form = QFormLayout(content)
+        form.setContentsMargins(18, 2, 4, 6)
+        form.setVerticalSpacing(4)
+        lay.addWidget(CollapsibleSection('Text style overrides', content,
+                                         expanded=True))
+        lay.addStretch()
+
+        def header(text):
+            lbl = QLabel(text.upper())
+            lbl.setStyleSheet(
+                'color:#cfcfcf; font-weight:bold; font-size:11px; '
+                'margin-top:8px; border-bottom:1px solid #4a4a4a; '
+                'padding-bottom:2px;')
+            form.addRow(lbl)
+
+        families = _installed_families()
 
         # ---- Font ----------------------------------------------------- #
-        form = section('Font')
+        header('Font')
+        self.cmb_default_font = QComboBox()
+        self.cmb_default_font.setEditable(True)
+        self.cmb_default_font.addItem('(auto — v1/Chrome stack)')
+        self.cmb_default_font.addItems(families)
+        if so.default_font:
+            self.cmb_default_font.setCurrentText(so.default_font)
+        else:
+            self.cmb_default_font.setCurrentIndex(0)
+        self.cmb_default_font.setToolTip(
+            'Preferred font for this language. Used for files that ask '
+            'for a generic font (most subtitles) and as the first '
+            'fallback — an explicit family in the file still wins. '
+            '"(auto)" uses the built-in stack, matching what Chrome '
+            'picked in v1 (Noto Sans CJK JP / Yu Gothic Medium…).')
+        form.addRow('Default font:', self.cmb_default_font)
         self.chk_size = QCheckBox('Override font size')
         self.ed_size = DimEdit(so.font_size)
         form.addRow(self.chk_size, self.ed_size)
-        self.chk_family = QCheckBox('Override font family')
-        self.ed_family = QLineEdit(', '.join(so.font_family))
-        self.ed_family.setPlaceholderText('e.g. Noto Sans CJK JP, sans-serif')
+        self.chk_family = QCheckBox('Force font family')
+        self.ed_family = QComboBox()
+        self.ed_family.setEditable(True)
+        self.ed_family.addItems(families)
+        self.ed_family.setCurrentText(', '.join(so.font_family))
+        self.ed_family.setToolTip(
+            'Force this family over whatever the file specifies. Pick '
+            'from installed fonts or type a comma-separated stack.')
+        if families:
+            comp = QCompleter(families, self.ed_family)
+            comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self.ed_family.setCompleter(comp)
         form.addRow(self.chk_family, self.ed_family)
         self.spin_boost = QDoubleSpinBox()
         self.spin_boost.setRange(0.0, 10.0)
@@ -248,7 +327,7 @@ class OverrideEditor(QWidget):
         form.addRow('Stroke weight boost:', self.spin_boost)
 
         # ---- Color ---------------------------------------------------- #
-        form = section('Color')
+        header('Color')
         self.chk_auto = QCheckBox('Auto color by video (SDR/HDR)')
         self.chk_auto.setToolTip(
             'Pick text color/alpha from each target video\'s dynamic '
@@ -272,7 +351,7 @@ class OverrideEditor(QWidget):
         form.addRow(self.chk_color, self.btn_color)
 
         # ---- Outline & shadow ----------------------------------------- #
-        form = section('Outline && shadow')
+        header('Outline & shadow')
         self.chk_outline = QCheckBox('Override outline')
         row_o = QHBoxLayout()
         self.chk_outline_on = QCheckBox('on')
@@ -315,7 +394,7 @@ class OverrideEditor(QWidget):
         form.addRow('   ', w_s2)
 
         # ---- Spacing & opacity ---------------------------------------- #
-        form = section('Spacing && opacity')
+        header('Spacing & opacity')
         self.chk_lh = QCheckBox('Override line height')
         self.ed_lh = DimEdit(so.line_height, ['', 'em', 'px', 'vh', '%'])
         form.addRow(self.chk_lh, self.ed_lh)
@@ -336,12 +415,14 @@ class OverrideEditor(QWidget):
         for w in (self.btn_color, self.btn_outline_c, self.btn_shadow_c,
                   self.btn_auto_sdr, self.btn_auto_hdr):
             w.changed.connect(self._commit)
-        self.ed_family.editingFinished.connect(self._commit)
+        self.ed_family.currentTextChanged.connect(self._commit)
+        self.cmb_default_font.currentTextChanged.connect(self._commit)
         self.spin_alpha.valueChanged.connect(self._commit)
         self.spin_salpha.valueChanged.connect(self._commit)
         self.spin_auto_sdr.valueChanged.connect(self._commit)
         self.spin_auto_hdr.valueChanged.connect(self._commit)
         self.spin_boost.valueChanged.connect(self._commit)
+        guard_wheel_children(self)
 
     def _load_flags(self):
         so = self.so
@@ -360,8 +441,12 @@ class OverrideEditor(QWidget):
         so.override_font_size = self.chk_size.isChecked()
         so.font_size = self.ed_size.dim()
         so.override_font_family = self.chk_family.isChecked()
-        so.font_family = [f.strip() for f in self.ed_family.text().split(',')
+        fam_text = self.ed_family.currentText()
+        so.font_family = [f.strip() for f in fam_text.split(',')
                           if f.strip()] or ['sans-serif']
+        dft = self.cmb_default_font.currentText().strip()
+        so.default_font = '' if (dft.startswith('(auto')
+                                 or not dft) else dft
         so.override_color = self.chk_color.isChecked()
         so.color = self.btn_color.color()
         so.auto_color = self.chk_auto.isChecked()
@@ -441,6 +526,7 @@ class LayoutOptionsEditor(QWidget):
             w.toggled.connect(self._commit)
         for w in (self.spin_arw, self.spin_arh, self.spin_pv, self.spin_ph):
             w.valueChanged.connect(self._commit)
+        guard_wheel_children(self)
 
     def _load(self):
         lo = self.lo
@@ -521,12 +607,20 @@ class StyleEditor(QWidget):
         self.e_sy = DimEdit(Dim(2, 'px'), ['px', 'em', 'vh'])
         self.e_sb = DimEdit(Dim(2, 'px'), ['px', 'em', 'vh'])
         self.e_sc = ColorButton((0, 0, 0, 255))
-        for w in (self.e_sx, self.e_sy, self.e_sb):
-            row_s.addWidget(w)
-        row_s.addWidget(self.e_sc)
+        row_s.addWidget(QLabel('X:'))
+        row_s.addWidget(self.e_sx, 1)
+        row_s.addWidget(QLabel('Y:'))
+        row_s.addWidget(self.e_sy, 1)
         ws = QWidget()
         ws.setLayout(row_s)
         form.addRow(self.c_shadow, ws)
+        row_s2 = QHBoxLayout()
+        row_s2.addWidget(QLabel('Blur:'))
+        row_s2.addWidget(self.e_sb, 1)
+        row_s2.addWidget(self.e_sc)
+        ws2 = QWidget()
+        ws2.setLayout(row_s2)
+        form.addRow('', ws2)
         # alignment / layout
         self.c_talign = add_row('Text align')
         self.e_talign = QComboBox()
@@ -597,6 +691,7 @@ class StyleEditor(QWidget):
             w.currentTextChanged.connect(self._commit)
         self.e_family.editingFinished.connect(self._commit)
         self.e_shear.valueChanged.connect(self._commit)
+        guard_wheel_children(self)
 
     # ------------------------------------------------------------------ #
     def load(self, style: Optional[Style]):
@@ -756,6 +851,7 @@ class RegionEditor(QWidget):
         for w in (self.c_w, self.c_h):
             w.toggled.connect(self._commit)
         self.style_editor.changed.connect(self.changed.emit)
+        guard_wheel_children(self)
 
     def load(self, region: Optional[Region]):
         self._loading = True

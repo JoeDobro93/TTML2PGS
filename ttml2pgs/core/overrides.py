@@ -27,6 +27,12 @@ class StyleOverrides:
     override_font_family: bool = False
     font_family: List[str] = field(default_factory=lambda: ['sans-serif'])
 
+    #: preferred default font for this language: used for generic families
+    #: and as the head of the fallback chain, without displacing families
+    #: the subtitle explicitly asks for. Empty = built-in stack (matches
+    #: what Chrome used in v1: Noto Sans CJK JP / Yu Gothic Medium…).
+    default_font: str = ''
+
     override_color: bool = False
     color: RGBA = (255, 255, 255, 255)
 

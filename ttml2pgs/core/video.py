@@ -110,6 +110,13 @@ def _detect_hdr_binary(path: str) -> bool:
 # Matching
 # --------------------------------------------------------------------------- #
 
+#: descriptive tokens streaming rips append after the language
+#: (``d1758520-_____.jajp.Dialog.Subtitle.ttml``)
+_STEM_DROP = {'forced', 'sdh', 'cc', 'full', 'default', 'dialog',
+              'dialogue', 'subtitle', 'subtitles', 'sub', 'subs',
+              'signs', 'songs', 'hi'}
+
+
 def subtitle_stem(path: str) -> str:
     """'Show.S01E01.ja.forced.ttml' -> 'Show.S01E01'."""
     name = os.path.basename(path)
@@ -117,10 +124,9 @@ def subtitle_stem(path: str) -> str:
     if len(parts) <= 1:
         return name
     parts = parts[:-1]  # drop extension
-    drop = {'forced', 'sdh', 'cc', 'full', 'default'}
     from .parsers import LANG_TOKENS
     while len(parts) > 1 and (parts[-1].lower() in LANG_TOKENS or
-                              parts[-1].lower() in drop):
+                              parts[-1].lower() in _STEM_DROP):
         parts.pop()
     return '.'.join(parts)
 
@@ -128,24 +134,36 @@ def subtitle_stem(path: str) -> str:
 def find_matching_video(sub_path: str,
                         search_dirs: Optional[List[str]] = None
                         ) -> Optional[str]:
-    """Find a video with the same stem next to the subtitle file."""
-    stem = subtitle_stem(sub_path).lower()
+    """
+    Find a video next to the subtitle file. Tried in order:
+    1. the subtitle stem with language/flag suffix tokens stripped;
+    2. v1's rule — everything before the first dot (rescues names whose
+       middle tokens aren't recognized, e.g. ``id-x.jajp.Foo.Bar.ttml``).
+    """
+    name = os.path.basename(sub_path)
+    stems = [subtitle_stem(sub_path).lower()]
+    first = name.split('.', 1)[0].lower()
+    if len(first) >= 3 and first not in stems:
+        stems.append(first)
     dirs = search_dirs or [os.path.dirname(os.path.abspath(sub_path))]
-    best: Optional[str] = None
-    for d in dirs:
-        try:
-            entries = os.listdir(d)
-        except OSError:
-            continue
-        for fn in entries:
-            if not fn.lower().endswith(VIDEO_EXTENSIONS):
+    for stem in stems:
+        best: Optional[str] = None
+        for d in dirs:
+            try:
+                entries = os.listdir(d)
+            except OSError:
                 continue
-            vstem = os.path.splitext(fn)[0].lower()
-            if vstem == stem or fn.lower().startswith(stem + '.'):
-                cand = os.path.normpath(os.path.join(d, fn))
-                if best is None or len(fn) < len(os.path.basename(best)):
-                    best = cand
-    return best
+            for fn in entries:
+                if not fn.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                vstem = os.path.splitext(fn)[0].lower()
+                if vstem == stem or fn.lower().startswith(stem + '.'):
+                    cand = os.path.normpath(os.path.join(d, fn))
+                    if best is None or len(fn) < len(os.path.basename(best)):
+                        best = cand
+        if best:
+            return best
+    return None
 
 
 def is_forced_name(path: str) -> bool:

@@ -36,6 +36,10 @@ LANG_TOKENS = {
     'he': 'he', 'heb': 'he', 'hi': 'hi', 'hin': 'hi',
 }
 
+# compact region forms streaming services use in filenames: jajp, enus…
+for _k in [k for k in LANG_TOKENS if '-' in k]:
+    LANG_TOKENS.setdefault(_k.replace('-', ''), LANG_TOKENS[_k])
+
 SUBTITLE_EXTENSIONS = ('.ttml', '.ttml2', '.dfxp', '.xml', '.vtt', '.webvtt',
                        '.srt', '.t2p')
 

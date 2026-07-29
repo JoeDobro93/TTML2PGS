@@ -372,9 +372,21 @@ class _PlayerView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFrameShape(QGraphicsView.Shape.NoFrame)
+        self.setInteractive(False)
+        # canvas-shaped black backdrop: with a video of a different AR the
+        # letterbox/pillarbox bars show exactly like they would on a TV
+        from PyQt6.QtGui import QBrush, QPen
+        from PyQt6.QtWidgets import QGraphicsRectItem
+        self._backdrop = QGraphicsRectItem(0, 0, 1920, 1080)
+        self._backdrop.setBrush(QBrush(QColor('#000000')))
+        self._backdrop.setPen(QPen(Qt.PenStyle.NoPen))
+        self._backdrop.setZValue(-2)
+        self.scene().addItem(self._backdrop)
         self.video_item = None
         if MULTIMEDIA_AVAILABLE:
             self.video_item = QGraphicsVideoItem()
+            self.video_item.setAspectRatioMode(
+                Qt.AspectRatioMode.KeepAspectRatio)
             self.scene().addItem(self.video_item)
         self._overlay_items: List[QGraphicsPixmapItem] = []
         self._region_items: List = []
@@ -383,6 +395,7 @@ class _PlayerView(QGraphicsView):
     def set_canvas(self, w: int, h: int):
         self._canvas = (w, h)
         self.scene().setSceneRect(QRectF(0, 0, w, h))
+        self._backdrop.setRect(0, 0, w, h)
         if self.video_item is not None:
             self.video_item.setSize(QSizeF(w, h))
         self._fit()
@@ -456,7 +469,25 @@ class PopOutWindow(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.stage)
+        self._external: Optional[QWidget] = None
         self._drag = QPoint()
+
+    def set_content(self, widget: QWidget):
+        """Host a borrowed widget (the live player view) instead of the
+        stills stage. release_content() gives it back."""
+        self.stage.hide()
+        self.layout().addWidget(widget)
+        widget.show()
+        self._external = widget
+
+    def release_content(self) -> Optional[QWidget]:
+        w = self._external
+        if w is not None:
+            self.layout().removeWidget(w)
+            w.setParent(None)
+            self._external = None
+        self.stage.show()
+        return w
 
     def lock_size(self, w: int, h: int):
         from PyQt6.QtGui import QGuiApplication
@@ -615,9 +646,10 @@ class PreviewPane(QWidget):
         bar.addStretch()
         self.btn_popout = QPushButton('Pop out (1:1)')
         self.btn_popout.setToolTip(
-            'Open a floating window locked to the output pixel size. '
-            'Works from player mode too (pauses playback and shows the '
-            'extracted frame behind the cue).')
+            'Float the preview at the output pixel size. In player mode '
+            'the LIVE player moves into the pop-out (video plays only '
+            'there; the transport bar here still controls it). In stills '
+            'mode it mirrors the still preview. Right-click it to close.')
         self.btn_player = QPushButton('Open in player ▸')
         self.btn_player.setToolTip(
             'Open the bound video in your own desktop player (MPC-BE, '
@@ -784,6 +816,8 @@ class PreviewPane(QWidget):
                 and self._player is not None and not self._player_failed)
 
     def _player_mode_changed(self, on: bool):
+        if self._popped_player and self.popout is not None:
+            self.popout.close()          # reclaims the player view first
         if on and not MULTIMEDIA_AVAILABLE:
             self.chk_player.setChecked(False)
             return
@@ -948,16 +982,26 @@ class PreviewPane(QWidget):
                 self.popout.stage.bg_color = c
                 self.popout.stage.update()
 
+    _popped_player = False
+
     def _toggle_popout(self):
         if self.popout is None:
-            # per design: the 1:1 pop-out pauses the embedded player
-            if self._player_active():
-                self._player.pause()
-                self._play_timer.stop()
-                self._sync_play_button()
             self.popout = PopOutWindow()
             self.popout.closed.connect(self._popout_closed)
-            if self.stage.scene:
+            if self._player_active():
+                # move the LIVE player view into the pop-out at 1:1 — the
+                # transport bar in the main pane keeps controlling it, and
+                # the video plays only in the pop-out.
+                self._popped_player = True
+                self._stack.removeWidget(self.player_view)
+                self.popout.set_content(self.player_view)
+                w, h = self.player_view._canvas
+                self.popout.lock_size(w, h)
+                self._stack.setCurrentWidget(self.stage)
+                self.lbl_info.setText(
+                    'Playing in the pop-out window (1:1) — transport '
+                    'below still controls it.')
+            elif self.stage.scene:
                 self.popout.lock_size(self.stage.scene.canvas_w,
                                       self.stage.scene.canvas_h)
                 self.popout.stage.matte_ar = self.stage.matte_ar
@@ -965,12 +1009,19 @@ class PreviewPane(QWidget):
                 self.popout.stage.set_scene(self.stage.scene)
             self.popout.show()
             self.btn_popout.setText('Close pop-out')
-            # ensure the stills scene is fresh for the popout
+            # keep the stills scene fresh (frame extraction for stills popout)
             self._debounce.start()
         else:
             self.popout.close()
 
     def _popout_closed(self):
+        if self._popped_player and self.popout is not None:
+            w = self.popout.release_content()
+            if w is not None:
+                self._stack.addWidget(self.player_view)
+            if self._player_active():
+                self._stack.setCurrentWidget(self.player_view)
+            self._popped_player = False
         self.popout = None
         self.btn_popout.setText('Pop out (1:1)')
 

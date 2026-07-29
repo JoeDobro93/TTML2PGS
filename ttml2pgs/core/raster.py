@@ -45,6 +45,13 @@ class GlyphBitmap:
     alpha: np.ndarray      # HxW float32 0..1
     left: int
     top: int
+    #: upward draw-time offset (px, subtracted from screen y). Moves the
+    #: shear origin of upright-vertical glyphs from the glyph origin to
+    #: the glyph center — without it, wide and narrow glyphs (kanji vs
+    #: small kana/quotes) get displaced along the column by different
+    #: amounts and a sheared column looks wobbly. v1's per-char CSS
+    #: skewY sheared about each char box center; this reproduces that.
+    dy: float = 0.0
 
 
 class GlyphCache:
@@ -61,7 +68,7 @@ class GlyphCache:
         return (g.face.path, g.face.index, g.gid,
                 round(g.font_px * 4) / 4,
                 g.synth_bold, g.synth_italic, round(st.shear_deg * 2) / 2,
-                g.rot90, round(g.scale_x * 100),
+                st.shear_axis, g.rot90, round(g.scale_x * 100),
                 round(stroke_px * 4) / 4,
                 round(st.embolden_px * 8) / 8)
 
@@ -144,14 +151,24 @@ class GlyphCache:
 
         bmp = blyph.bitmap
         w, h = bmp.width, bmp.rows
+        # center-origin correction for sheared upright-vertical glyphs:
+        # the FT matrix shears about the glyph origin (y' = y - t*x), so a
+        # glyph is displaced along the column by t * its x-center. Cancel
+        # that so every glyph shears about its own center like v1.
+        dy = 0.0
+        if not g.rot90 and g.style.shear_axis == 'y' and abs(t) > 1e-6 \
+                and w > 0:
+            dy = t * (blyph.left + w / 2.0)
         if w == 0 or h == 0:
-            return GlyphBitmap(np.zeros((0, 0), np.float32), blyph.left, blyph.top)
+            return GlyphBitmap(np.zeros((0, 0), np.float32),
+                               blyph.left, blyph.top)
         buf = np.array(bmp.buffer, dtype=np.uint8)
         if bmp.pitch != w:
             buf = buf.reshape(h, abs(bmp.pitch))[:, :w]
         else:
             buf = buf.reshape(h, w)
-        return GlyphBitmap(buf.astype(np.float32) / 255.0, blyph.left, blyph.top)
+        return GlyphBitmap(buf.astype(np.float32) / 255.0,
+                           blyph.left, blyph.top, dy)
 
 
 _glyph_cache = GlyphCache()
@@ -313,6 +330,8 @@ def render_layout(result: LayoutResult, extra_opacity: float = 1.0
             continue
         stroke_bmp = _glyph_cache.get(g, stroke) if stroke > 0.05 else None
 
+        sdy = int(round(fill_bmp.dy))       # shear center-origin correction
+
         # shadow mask accumulation (union of stroke+fill silhouette)
         if st.shadows:
             sig = (tuple((round(s.dx, 2), round(s.dy, 2), round(s.blur, 2),
@@ -323,16 +342,17 @@ def render_layout(result: LayoutResult, extra_opacity: float = 1.0
                        'shadows': st.shadows, 'opacity': op}
                 shadow_groups[sig] = grp
             src = stroke_bmp if stroke_bmp is not None else fill_bmp
-            _blit_max(grp['mask'], src.alpha, x + src.left, y - src.top)
+            _blit_max(grp['mask'], src.alpha, x + src.left,
+                      y - src.top - sdy)
             if stroke_bmp is not None:
                 _blit_max(grp['mask'], fill_bmp.alpha,
-                          x + fill_bmp.left, y - fill_bmp.top)
+                          x + fill_bmp.left, y - fill_bmp.top - sdy)
 
         if stroke_bmp is not None:
             _blit_mask(outline, stroke_bmp.alpha, x + stroke_bmp.left,
-                       y - stroke_bmp.top, st.outline_color, op)
+                       y - stroke_bmp.top - sdy, st.outline_color, op)
         _blit_mask(fill, fill_bmp.alpha, x + fill_bmp.left,
-                   y - fill_bmp.top, st.color, op)
+                   y - fill_bmp.top - sdy, st.color, op)
 
     # ---- decorations (underline etc.) --------------------------------- #
     for rect in result.rects:
