@@ -84,13 +84,30 @@ class _NoWheelFilter(QObject):
         return False
 
 
-_no_wheel_filter = _NoWheelFilter()
+_no_wheel_filter: Optional[_NoWheelFilter] = None
+
+
+def _wheel_filter() -> _NoWheelFilter:
+    """Lazily (re)created — a module-level QObject dies with the
+    QApplication, so check liveness before reuse."""
+    global _no_wheel_filter
+    alive = False
+    if _no_wheel_filter is not None:
+        try:
+            from PyQt6 import sip
+            alive = not sip.isdeleted(_no_wheel_filter)
+        except ImportError:                            # pragma: no cover
+            alive = True
+    if not alive:
+        _no_wheel_filter = _NoWheelFilter()
+    return _no_wheel_filter
 
 
 def guard_wheel(*widgets):
+    f = _wheel_filter()
     for w in widgets:
         w.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        w.installEventFilter(_no_wheel_filter)
+        w.installEventFilter(f)
 
 
 def guard_wheel_children(root: QWidget):
@@ -590,6 +607,27 @@ class LayoutOptionsEditor(QWidget):
         self.chk_169.setChecked(lo.force_16_9)
         self.chk_ar.setChecked(lo.override_ar)
         self.chk_pad.setChecked(lo.use_padding)
+        self._sync_enabled()
+
+    def _sync_enabled(self):
+        """Grey out options that another enabled option overrides, so
+        the winner is obvious."""
+        self.chk_hd.setEnabled(self.chk_vidims.isChecked())
+        # a manual content-AR override wins over "force 16:9"
+        ar_on = self.chk_ar.isChecked()
+        self.chk_169.setEnabled(not ar_on)
+        self.chk_169.setToolTip(
+            'Content AR override is on — it wins over Force 16:9.'
+            if ar_on else
+            'Lay text out over the full canvas even when the video\'s '
+            'aspect differs.')
+        # "force 16:9" makes the AR override moot the other way? No —
+        # override wins; but it does make the VIDEO AR moot, nothing to
+        # grey. AR/padding spins follow their checkboxes:
+        for w in (self.spin_arw, self.spin_arh):
+            w.setEnabled(ar_on)
+        for w in (self.spin_pv, self.spin_ph):
+            w.setEnabled(self.chk_pad.isChecked())
 
     def _commit(self, *_):
         lo = self.lo
@@ -602,6 +640,7 @@ class LayoutOptionsEditor(QWidget):
         lo.use_padding = self.chk_pad.isChecked()
         lo.padding_v = self.spin_pv.value()
         lo.padding_h = self.spin_ph.value()
+        self._sync_enabled()
         self.changed.emit()
 
 
@@ -628,7 +667,16 @@ class StyleEditor(QWidget):
 
         # font
         self.c_family = add_row('Font family')
-        self.e_family = QLineEdit()
+        self.e_family = QComboBox()
+        self.e_family.setEditable(True)
+        fams = _installed_families()
+        self.e_family.addItems(fams)
+        self.e_family.setCurrentText('')
+        if fams:
+            comp = QCompleter(fams, self.e_family)
+            comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            self.e_family.setCompleter(comp)
+        compact(self.e_family)
         form.addRow(self.c_family, self.e_family)
         self.c_size = add_row('Font size')
         self.e_size = DimEdit(Dim(100, '%'))
@@ -736,7 +784,7 @@ class StyleEditor(QWidget):
         for w in (self.e_weight, self.e_style, self.e_talign, self.e_dalign,
                   self.e_mra, self.e_wm, self.e_emph, self.e_tcy):
             w.currentTextChanged.connect(self._commit)
-        self.e_family.editingFinished.connect(self._commit)
+        self.e_family.currentTextChanged.connect(self._commit)
         self.e_shear.valueChanged.connect(self._commit)
         guard_wheel_children(self)
 
@@ -746,8 +794,10 @@ class StyleEditor(QWidget):
         self.style = style
         s = style or Style()
         self.c_family.setChecked(s.font_family is not None)
-        if s.font_family:
-            self.e_family.setText(', '.join(s.font_family))
+        self.e_family.blockSignals(True)
+        self.e_family.setCurrentText(', '.join(s.font_family)
+                                     if s.font_family else '')
+        self.e_family.blockSignals(False)
         self.c_size.setChecked(s.font_size is not None)
         if s.font_size:
             self.e_size.set_dim(s.font_size)
@@ -802,7 +852,8 @@ class StyleEditor(QWidget):
         if self._loading or self.style is None:
             return
         s = self.style
-        s.font_family = [f.strip() for f in self.e_family.text().split(',')
+        fam_text = self.e_family.currentText()
+        s.font_family = [f.strip() for f in fam_text.split(',')
                          if f.strip()] if self.c_family.isChecked() else None
         s.font_size = self.e_size.dim() if self.c_size.isChecked() else None
         s.font_weight = self.e_weight.currentText() \
@@ -1188,7 +1239,8 @@ class SettingsPane(QWidget):
                 self.style_list.addItem(self._style_item(sid))
             self.region_list.addItems(list(doc.regions.keys()))
             self.initial_editor.load(doc.initial)
-            self.ensure_language_tab(doc.language)
+            # deliberately NO ensure_language_tab here: languages follow
+            # Default until the user adds a tab via '+' themselves
         else:
             self.initial_editor.load(None)
         self.style_editor.load(None)

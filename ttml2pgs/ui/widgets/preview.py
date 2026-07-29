@@ -66,6 +66,8 @@ class PreviewScene:
     #: (rid, '#rrggbb', x, y, w, h, label_corner) per region — only
     #: populated when "Show regions" is on
     region_boxes: Optional[List[tuple]] = None
+    #: safe-area padding inset per edge (px, canvas space); (0,0) = off
+    pad: Tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass
@@ -229,7 +231,8 @@ class _RenderWorker(QObject):
                   want_frame: bool, tone_map: bool):
         canvas, renderer = self._make_renderer(ctx)
         scene = PreviewScene(canvas_w=canvas.width, canvas_h=canvas.height,
-                             content=canvas.content, renders=[])
+                             content=canvas.content, renders=[],
+                             pad=(canvas.pad_x, canvas.pad_y))
         t = cue.begin_ms + 1.0
         active = [c for c in ctx.doc.cues
                   if c.begin_ms <= t < c.end_ms and c.enabled]
@@ -330,6 +333,18 @@ class _Stage(QWidget):
             p.drawRect(int(ox + cx * scale), int(oy + cy * scale),
                        int(cw2 * scale), int(ch2 * scale))
 
+        # safe-area padding guides (where regions are allowed to anchor)
+        px_, py_ = self.scene.pad
+        if px_ > 0 or py_ > 0:
+            pen = p.pen()
+            pen.setColor(QColor(120, 220, 130, 180))
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawRect(int(ox + (cx + px_) * scale),
+                       int(oy + (cy + py_) * scale),
+                       int((cw2 - 2 * px_) * scale),
+                       int((ch2 - 2 * py_) * scale))
+
         for x, y, pm in self._cue_pixmaps:
             p.drawPixmap(int(ox + x * scale), int(oy + y * scale),
                          int(pm.width() * scale), int(pm.height() * scale),
@@ -392,6 +407,7 @@ class _PlayerView(QGraphicsView):
             self.scene().addItem(self.video_item)
         self._overlay_items: List[QGraphicsPixmapItem] = []
         self._region_items: List = []
+        self._pad_item = None
         self._canvas = (1920, 1080)
 
     def set_canvas(self, w: int, h: int):
@@ -415,6 +431,24 @@ class _PlayerView(QGraphicsView):
             item.setZValue(10)
             self.scene().addItem(item)
             self._overlay_items.append(item)
+
+    def set_padding_guide(self, rect: Optional[Tuple[float, float,
+                                                     float, float]]):
+        from PyQt6.QtGui import QPen
+        from PyQt6.QtWidgets import QGraphicsRectItem
+        if self._pad_item is not None:
+            self.scene().removeItem(self._pad_item)
+            self._pad_item = None
+        if rect is None:
+            return
+        item = QGraphicsRectItem(*rect)
+        pen = QPen(QColor(120, 220, 130, 200))
+        pen.setStyle(Qt.PenStyle.DashLine)
+        pen.setWidth(2)
+        item.setPen(pen)
+        item.setZValue(19)
+        self.scene().addItem(item)
+        self._pad_item = item
 
     def set_region_boxes(self, boxes: Optional[List[tuple]]):
         from PyQt6.QtGui import QFont, QPen
@@ -863,6 +897,13 @@ class PreviewPane(QWidget):
         self.stage.set_scene(scene)
         self.player_view.set_canvas(scene.canvas_w, scene.canvas_h)
         self.player_view.set_region_boxes(scene.region_boxes)
+        px_, py_ = scene.pad
+        if px_ > 0 or py_ > 0:
+            cx, cy, cw, ch = scene.content
+            self.player_view.set_padding_guide(
+                (cx + px_, cy + py_, cw - 2 * px_, ch - 2 * py_))
+        else:
+            self.player_view.set_padding_guide(None)
         if self._mpv is not None:
             self._mpv.set_canvas(scene.canvas_w, scene.canvas_h,
                                  scene.content)

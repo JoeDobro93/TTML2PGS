@@ -882,9 +882,11 @@ class TestPipelineAndQueue(unittest.TestCase):
         sheared = render(15.0)
         self.assertIsNotNone(sheared)
         t = math.tan(math.radians(15.0))
-        expect = t * (sheared.left + sheared.alpha.shape[1] / 2.0)
+        # vertical flow renders the INVERTED shear sign (authored 15°
+        # leans the same way it does horizontally)
+        expect = -t * (sheared.left + sheared.alpha.shape[1] / 2.0)
         self.assertAlmostEqual(sheared.dy, expect, places=3)
-        self.assertGreater(sheared.dy, 1.0)     # meaningful correction
+        self.assertLess(sheared.dy, -1.0)       # meaningful correction
         # no correction without shear, and none for horizontal italics
         self.assertEqual(render(0.0).dy, 0.0)
         self.assertEqual(render(15.0, axis='x').dy, 0.0)
@@ -1014,6 +1016,93 @@ class TestPipelineAndQueue(unittest.TestCase):
         rebuilt = MCue(begin_ms=0, end_ms=1000)
         rebuilt.root = tree2
         self.assertEqual(rebuilt.plain_text(), 'x⟦y⟧z')
+
+    def test_no_auto_language_sets_and_migration(self):
+        """Opening a file must not clone Default into a language set;
+        saved identical clones from older builds are dropped on load."""
+        from ttml2pgs.ui.state import AppState
+        with tempfile.TemporaryDirectory() as td:
+            old = os.environ.get('XDG_CONFIG_HOME')
+            os.environ['XDG_CONFIG_HOME'] = td
+            try:
+                st = AppState()
+                st.open_subtitle(sample('netflix_ja.ttml'))
+                self.assertEqual(set(st.overrides.by_lang), {''},
+                                 'opening a file must not create a '
+                                 'language override set')
+                # migration: identical 'ja' clone dropped, modified kept
+                st.overrides.ensure_language('ja')
+                st.overrides.ensure_language('en')
+                st.overrides.by_lang['en'].weight_boost = 7.0
+                st.save_settings()
+                st2 = AppState()
+                st2.load_settings()
+                self.assertNotIn('ja', st2.overrides.by_lang)
+                self.assertIn('en', st2.overrides.by_lang)
+                self.assertEqual(st2.overrides.by_lang['en'].weight_boost,
+                                 7.0)
+            finally:
+                if old is None:
+                    os.environ.pop('XDG_CONFIG_HOME', None)
+                else:
+                    os.environ['XDG_CONFIG_HOME'] = old
+
+    def test_emphasis_mark_outline_ring(self):
+        """Emphasis dots get a matching round outline UNDER the mark."""
+        ttml = '''<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:tts="http://www.w3.org/ns/ttml#styling" xml:lang="ja">
+ <body><div>
+  <p begin="0s" end="2s"><span tts:textEmphasis="filled dot before">
+点々</span></p>
+ </div></body></tt>'''
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'e.ttml')
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(ttml)
+            doc = load_subtitle(path)
+        ov = OverrideSet()
+        so = ov.by_lang['']
+        so.override_outline = True
+        so.outline_enabled = True
+        so.outline_width = Dim(5, 'px')
+        so.outline_color = (0, 0, 0, 255)
+        canvas = compute_canvas((1920, 1080), ov.layout)
+        rc = CueRenderer(doc, canvas, ov).render_cue(doc.cues[0])
+        self.assertIsNotNone(rc)
+        a = rc.bitmap[..., 3]
+        rgb = rc.bitmap[..., :3].astype(int)
+        white = (a > 200) & (rgb.sum(axis=2) > 500)
+        black = (a > 200) & (rgb.sum(axis=2) < 150)
+        self.assertTrue(white.any() and black.any())
+        top_white = int(np.nonzero(white.any(axis=1))[0].min())
+        top_black = int(np.nonzero(black.any(axis=1))[0].min())
+        # the ring sits ABOVE the mark's white fill (outline under mark)
+        self.assertLess(top_black, top_white)
+
+    def test_layout_options_conflict_greying(self):
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        _app = QApplication.instance() or QApplication([])
+        from ttml2pgs.core.overrides import LayoutOptions
+        from ttml2pgs.ui.widgets.settings_panel import LayoutOptionsEditor
+        ed = LayoutOptionsEditor(LayoutOptions())
+        self.assertFalse(ed.chk_hd.isEnabled())      # needs video dims
+        ed.chk_vidims.setChecked(True)
+        self.assertTrue(ed.chk_hd.isEnabled())
+        self.assertFalse(ed.spin_arw.isEnabled())    # needs AR override
+        ed.chk_ar.setChecked(True)
+        self.assertTrue(ed.spin_arw.isEnabled())
+        self.assertFalse(ed.chk_169.isEnabled())     # AR override wins
+        ed.chk_ar.setChecked(False)
+        self.assertTrue(ed.chk_169.isEnabled())
+        self.assertFalse(ed.spin_pv.isEnabled())
+        ed.chk_pad.setChecked(True)
+        self.assertTrue(ed.spin_pv.isEnabled())
 
     def test_ruby_baked_inline_and_styles_pruned(self):
         """Ruby roles are baked onto spans at load; role-only styles are

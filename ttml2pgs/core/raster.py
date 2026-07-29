@@ -105,14 +105,16 @@ class GlyphCache:
         # the same matrix pre-rotation gives the correct vertical slant for
         # rotated runs. Upright vertical glyphs shear along y instead.
         if g.rot90:
-            # F_rot(cw, y-up) = [[0,1],[-1,0]] composed onto
-            # F_shear@F_scale = [[sx, t],[0,1]]  →  [[0,1],[-sx,-t]]
-            xx, xy, yx, yy = 0.0, 1.0, -sx, -t
+            # F_rot(cw, y-up) = [[0,1],[-1,0]] composed onto the shear —
+            # vertical flow inverts the shear sign so an authored 15°
+            # leans the same way it does horizontally.
+            xx, xy, yx, yy = 0.0, 1.0, -sx, t
         else:
             # Upright glyphs in vertical flow slant along the inline (y)
-            # axis instead (classic vertical italics).
+            # axis (classic vertical italics), with the sign inverted to
+            # match the authored direction.
             if g.style.shear_axis == 'y':
-                xx, xy, yx, yy = sx, 0.0, -t, 1.0
+                xx, xy, yx, yy = sx, 0.0, t, 1.0
             else:
                 xx, xy, yx, yy = sx, t, 0.0, 1.0
 
@@ -152,13 +154,13 @@ class GlyphCache:
         bmp = blyph.bitmap
         w, h = bmp.width, bmp.rows
         # center-origin correction for sheared upright-vertical glyphs:
-        # the FT matrix shears about the glyph origin (y' = y - t*x), so a
+        # the FT matrix shears about the glyph origin (y' = y + t*x), so a
         # glyph is displaced along the column by t * its x-center. Cancel
         # that so every glyph shears about its own center like v1.
         dy = 0.0
         if not g.rot90 and g.style.shear_axis == 'y' and abs(t) > 1e-6 \
                 and w > 0:
-            dy = t * (blyph.left + w / 2.0)
+            dy = -t * (blyph.left + w / 2.0)
         if w == 0 or h == 0:
             return GlyphBitmap(np.zeros((0, 0), np.float32),
                                blyph.left, blyph.top)
@@ -246,10 +248,13 @@ def _fill_rect(layer: np.ndarray, x: float, y: float, w: float, h: float,
     dst += src
 
 
-def _mark_mask(mark: Mark) -> Tuple[np.ndarray, int, int]:
-    """Render an emphasis mark (dot/circle/sesame) to an alpha tile."""
+def _mark_mask(mark: Mark, grow: float = 0.0
+               ) -> Tuple[np.ndarray, int, int]:
+    """Render an emphasis mark (dot/circle/sesame) to an alpha tile.
+    ``grow`` expands the shape outward — used to draw a matching round
+    outline UNDER the mark (same silhouette, not a square dilation)."""
     ss = 4
-    r = max(1.0, mark.radius)
+    r = max(1.0, mark.radius) + max(0.0, grow)
     size = int(math.ceil(r * 2)) + 4
     img = Image.new('L', (size * ss, size * ss), 0)
     d = ImageDraw.Draw(img)
@@ -257,7 +262,8 @@ def _mark_mask(mark: Mark) -> Tuple[np.ndarray, int, int]:
     rr = r * ss
     if mark.sesame:
         # sesame: slanted teardrop-ish ellipse
-        bbox = [cx - rr, cy - rr * 0.62, cx + rr, cy + rr * 0.62]
+        bbox = [cx - rr, cy - rr * 0.62 - grow * ss * 0.38,
+                cx + rr, cy + rr * 0.62 + grow * ss * 0.38]
         if mark.filled:
             d.ellipse(bbox, fill=255)
         else:
@@ -268,7 +274,8 @@ def _mark_mask(mark: Mark) -> Tuple[np.ndarray, int, int]:
         if mark.filled:
             d.ellipse(bbox, fill=255)
         else:
-            d.ellipse(bbox, outline=255, width=max(1, int(rr * 0.35)))
+            width = max(1, int((mark.radius * 0.35 + grow) * ss))
+            d.ellipse(bbox, outline=255, width=width)
     img = img.resize((size, size), Image.LANCZOS)
     mask = np.asarray(img, np.float32) / 255.0
     return mask, int(round(mark.cx - size / 2)), int(round(mark.cy - size / 2))
@@ -364,12 +371,13 @@ def render_layout(result: LayoutResult, extra_opacity: float = 1.0
     for mark in result.marks:
         mask, mx, my = _mark_mask(mark)
         op = mark.style.opacity if mark.style else 1.0
-        # marks get the outline treatment too (visibility over video)
+        # marks get the outline treatment too (visibility over video):
+        # a grown copy of the same silhouette painted underneath
         st = mark.style
         if st is not None and st.outline_px > 0.05:
-            ow = max(1, int(round(st.outline_px * 0.85)))
-            big = _dilate(mask, ow)
-            _blit_mask(outline, big, mx + pad - ow, my + pad - ow,
+            ow = max(1.0, st.outline_px * 0.85)
+            big, bx, by = _mark_mask(mark, grow=ow)
+            _blit_mask(outline, big, bx + pad, by + pad,
                        st.outline_color, op)
         _blit_mask(fill, mask, mx + pad, my + pad, mark.color, op)
         if st is not None and st.shadows:
@@ -416,12 +424,3 @@ def render_layout(result: LayoutResult, extra_opacity: float = 1.0
     out[..., :3] = rgb
     out8 = (np.clip(out, 0, 1) * 255 + 0.5).astype(np.uint8)
     return RenderedBlock(out8, pad - x0, pad - y0)
-
-
-def _dilate(mask: np.ndarray, r: int) -> np.ndarray:
-    """Cheap square dilation used for emphasis-mark outlines."""
-    img = Image.fromarray((np.clip(mask, 0, 1) * 255).astype(np.uint8))
-    img = img.filter(ImageFilter.MaxFilter(2 * r + 1))
-    out = np.zeros((mask.shape[0] + 2 * r, mask.shape[1] + 2 * r), np.float32)
-    out[r:-r or None, r:-r or None] = np.asarray(img, np.float32) / 255.0
-    return out

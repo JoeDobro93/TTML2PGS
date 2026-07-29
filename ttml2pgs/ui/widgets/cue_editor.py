@@ -496,10 +496,10 @@ def _literal_meta(lit: str) -> Tuple[str, str, str]:
         return 'atom', sid, prev or sid
     if lit.startswith(OPEN):
         sid = lit[1:]
-        label = 'ルビ ▸' if sid.startswith('ル') else f'{sid} ▸'
+        label = 'ruby ▸' if sid.startswith('ル') else f'{sid} ▸'
         return 'open', sid, label
     sid = lit[:-1]
-    label = '◂ ルビ' if sid.startswith('ル') else f'◂ {sid}'
+    label = '◂ ruby' if sid.startswith('ル') else f'◂ {sid}'
     return 'close', sid, label
 
 
@@ -1089,11 +1089,11 @@ class SelectedCuePane(QWidget):
         self.btn_i.setToolTip('Italicize the selection (independent of '
                               'styles)')
         self.btn_ruby = QToolButton()
-        self.btn_ruby.setText('ルビ')
+        self.btn_ruby.setText('Ruby')
         self.btn_ruby.setToolTip(
             'Make the selected text a ruby base and type its reading '
             'into the () that appear — 漢字(かんじ). Edit base/reading '
-            'as plain text inside the ルビ chips; delete the (reading) '
+            'as plain text inside the ruby chips; delete the (reading) '
             'to remove the furigana.')
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_b)

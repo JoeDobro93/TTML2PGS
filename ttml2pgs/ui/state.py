@@ -130,8 +130,9 @@ class AppState:
         sess.out_path = sess.default_out_path()
         self.sessions.append(sess)
         self.active_index = len(self.sessions) - 1
-        # make sure the language has an override tab available
-        self.overrides.ensure_language(doc.language)
+        # NOTE: no per-language override set is auto-created — languages
+        # without their own tab follow Default, and tabs are added only
+        # manually (the auto-created clones used to hijack Default edits).
         return sess
 
     def close_session(self, index: int):
@@ -161,6 +162,15 @@ class AppState:
             ov = data.get('overrides')
             if ov:
                 self.overrides = OverrideSet.from_dict(ov)
+            # drop auto-created language sets that are identical to
+            # Default — they were cloned on file-open by older builds and
+            # silently detached those languages from Default edits
+            base = self.overrides.by_lang.get('')
+            if base is not None:
+                bd = base.to_dict()
+                for lang in [l for l, so in self.overrides.by_lang.items()
+                             if l and so.to_dict() == bd]:
+                    del self.overrides.by_lang[lang]
             if int(data.get('version', 1)) < 2:
                 # 2.0.1 defaults changed: stem darkening calibrated to 3.0
                 # and auto-color enabled. Migrate configs saved before the
