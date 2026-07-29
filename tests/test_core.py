@@ -903,6 +903,39 @@ class TestPipelineAndQueue(unittest.TestCase):
         self.assertIn('wenquanyi', names,
                       'preferred font must head the generic resolution')
 
+    def test_main_window_constructs_offscreen(self):
+        """GUI smoke test: the whole MainWindow builds headless and the
+        queue dock helper doesn't recurse (regression: 2.0.x sed bug made
+        _show_queue call itself)."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        with tempfile.TemporaryDirectory() as td:
+            old_cfg = os.environ.get('XDG_CONFIG_HOME')
+            os.environ['XDG_CONFIG_HOME'] = td
+            try:
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance() or QApplication([])
+                from ttml2pgs.ui.main_window import MainWindow
+                win = MainWindow()
+                try:
+                    win._show_queue()
+                    self.assertFalse(win.queue_dock.isHidden())
+                    win._show_queue()          # must be idempotent
+                finally:
+                    win.queue.shutdown()
+                    win.preview_pane.shutdown_players()
+                del app
+            except Exception:
+                raise
+            finally:
+                if old_cfg is None:
+                    os.environ.pop('XDG_CONFIG_HOME', None)
+                else:
+                    os.environ['XDG_CONFIG_HOME'] = old_cfg
+
     def test_parse_style_refs(self):
         try:
             from ttml2pgs.ui.widgets.cue_table import parse_style_refs

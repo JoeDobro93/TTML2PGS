@@ -247,7 +247,7 @@ class MainWindow(QMainWindow):
         """Show the queue dock; when it's docked on a side, widen the
         window so it doesn't crush the other panes (screen permitting)."""
         was_hidden = self.queue_dock.isHidden()
-        self._show_queue()
+        self.queue_dock.show()
         if not was_hidden or self.queue_dock.isFloating():
             return
         area = self.dockWidgetArea(self.queue_dock)
