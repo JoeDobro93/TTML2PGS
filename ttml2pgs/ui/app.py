@@ -51,6 +51,13 @@ def apply_dark_theme(app):
 
 
 def main() -> int:
+    # Quiet the Qt Multimedia FFmpeg decoder's per-frame chatter — e.g.
+    # Dolby Vision streams log "Skipping NAL unit 62/63" for every frame
+    # (the DV metadata NALs FFmpeg doesn't consume). Harmless, but it
+    # floods the console. A user-set QT_LOGGING_RULES is respected.
+    if 'QT_LOGGING_RULES' not in os.environ:
+        os.environ['QT_LOGGING_RULES'] = 'qt.multimedia.ffmpeg.*=false'
+
     # Windows: unique taskbar identity
     if os.name == 'nt':
         try:
