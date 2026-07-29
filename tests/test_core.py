@@ -936,6 +936,85 @@ class TestPipelineAndQueue(unittest.TestCase):
                 else:
                     os.environ['XDG_CONFIG_HOME'] = old_cfg
 
+    def test_cue_markup_roundtrip(self):
+        """Token markup: cue → text → tree must be canonical (idempotent)
+        and render-identical, ruby atoms included."""
+        try:
+            from ttml2pgs.ui.widgets.cue_editor import CueMarkup
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        for name in ('netflix_ja.ttml', 'styled.vtt', 'basic.srt'):
+            doc = load_subtitle(sample(name))
+            for cue in doc.cues:
+                mk = CueMarkup.from_cue(doc, cue)
+                tree, reason = mk.to_tree(mk.text)
+                self.assertIsNotNone(tree, f'{name}: {reason}')
+                rebuilt = cue.copy()
+                rebuilt.root = tree
+                mk2 = CueMarkup.from_cue(doc, rebuilt)
+                self.assertEqual(mk2.text, mk.text,
+                                 f'{name}: markup not canonical')
+        # render equivalence on a ruby cue
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        r = CueRenderer(doc, canvas, OverrideSet())
+        cue = doc.cues[0]
+        before = r.render_cue(cue)
+        mk = CueMarkup.from_cue(doc, cue)
+        cue.root = mk.to_tree(mk.text)[0]
+        after = r.render_cue(cue)
+        self.assertEqual((before.x, before.y), (after.x, after.y))
+        self.assertTrue(np.array_equal(before.bitmap, after.bitmap),
+                        'render changed after markup round-trip')
+
+    def test_cue_markup_overlap_and_validation(self):
+        try:
+            from ttml2pgs.ui.widgets.cue_editor import CueMarkup
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        from ttml2pgs.core.model import (Cue as MCue, SpanNode, Style,
+                                         SubtitleDocument)
+        doc = SubtitleDocument()
+        doc.styles['a'] = Style(id='a', color=(255, 0, 0, 255))
+        doc.styles['b'] = Style(id='b', font_weight='bold')
+        mk = CueMarkup(doc=doc)
+
+        # overlap normalizes into nested spans (HTML semantics)
+        tree, reason = mk.to_tree('⟦axx ⟦byy a⟧zz b⟧')
+        self.assertIsNotNone(tree, reason)
+        cue = MCue(begin_ms=0, end_ms=1000)
+        cue.root = tree
+        canonical = CueMarkup.from_cue(doc, cue).text
+        self.assertEqual(canonical, '⟦axx ⟦byy b⟧a⟧⟦bzz b⟧')
+        self.assertEqual(cue.plain_text(), 'xx yy zz ')
+
+        # b/i pseudo styles map to inline bold/italic spans
+        tree, _ = mk.to_tree('⟦bhi b⟧ and ⟦ithere i⟧')
+        spans = [n for n in tree.children if n.kind == 'span']
+        self.assertEqual(spans[0].inline_style.font_weight, 'bold')
+        self.assertEqual(spans[1].inline_style.font_style, 'italic')
+
+        # invalid states are rejected with reasons
+        for bad in ('⟦a x',                 # never closed
+                    'a⟧ x ⟦a',              # end before start
+                    '⟦a ⟦a x a⟧ a⟧',        # self-nesting
+                    '⟦zz x zz⟧',            # unknown style
+                    'stray ⟧ here'):
+            tree, reason = mk.to_tree(bad)
+            self.assertIsNone(tree, f'{bad!r} should be invalid')
+            self.assertTrue(reason)
+
+        # literal ⟦ in subtitle text is escaped and survives
+        cue2 = MCue(begin_ms=0, end_ms=1000)
+        cue2.root = SpanNode(kind='root')
+        cue2.root.children.append(SpanNode.text_node('x⟦y⟧z'))
+        mk2 = CueMarkup.from_cue(doc, cue2)
+        tree2, reason2 = mk2.to_tree(mk2.text)
+        self.assertIsNotNone(tree2, reason2)
+        rebuilt = MCue(begin_ms=0, end_ms=1000)
+        rebuilt.root = tree2
+        self.assertEqual(rebuilt.plain_text(), 'x⟦y⟧z')
+
     def test_parse_style_refs(self):
         try:
             from ttml2pgs.ui.widgets.cue_table import parse_style_refs

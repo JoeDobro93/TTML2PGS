@@ -144,9 +144,16 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   **Style column** shows each cue's named styles (italic *default* =
   defers to Initials, ✎ = has inline overrides) and is editable —
   region/style edits on a multi-selection apply to every selected cue.
-  The collapsible **Selected cue** pane beneath reveals the current
-  cue's full style chain (including TTML `<body>`/`<div>`-inherited
-  refs) and edits its inline `<p>` style live.
+  The collapsible **Selected cue** pane beneath shows the cue's text
+  with visible **style tokens** — `⟦Style1 … Style1⟧`, like TTML spans
+  made draggable. Highlight text and *Add style* (or **B**/**I**) to
+  wrap it; drag tokens to move where styling starts/ends (overlaps
+  auto-normalize into nested spans); deleting a token removes its
+  partner and keeps the text. Only existing styles can be applied, and
+  any edit that would corrupt the structure reverts with an
+  explanation. Ruby/tate-chū-yoko blocks appear as solid chips so
+  complex structure survives; the cue-level (`<p>`) style refs are
+  editable on the line above.
 * **Preview** — an **embedded video player** (SubtitleEdit-style):
   plays the bound video with live subtitle overlays kept in sync —
   overlapping cues included, rendered by the same engine that feeds the

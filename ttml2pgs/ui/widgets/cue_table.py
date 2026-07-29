@@ -249,6 +249,7 @@ class CueModel(QAbstractTableModel):
 
     def refresh_cue(self, cue: Cue):
         """Repaint one cue's row (e.g. after Selected-cue pane edits)."""
+        self._previews.pop(id(cue), None)
         for row, c in enumerate(self.cues):
             if c is cue:
                 self.dataChanged.emit(self.index(row, 0),
