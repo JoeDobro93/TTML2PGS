@@ -868,6 +868,119 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertTrue(q2.groups[0].render_jobs[0].started)
             self.assertFalse(q2.groups[1].render_jobs[0].started)
 
+    def test_failed_mux_runs_once_and_others_proceed(self):
+        """Batch regression: a failing mux must go FAILED after ONE
+        attempt (no instant re-pick loop) and must not starve the other
+        groups' muxes. retry_mux re-arms it explicitly; the before_mux
+        hook fires so the UI can release player file handles."""
+        from ttml2pgs.core import jobqueue
+        from ttml2pgs.core.jobqueue import QueueManager, JobState
+
+        calls: list = []
+        fail_ep1 = {'on': True}
+
+        def fake_remux(video, subs, replace_original=True,
+                       progress=None, cancel=None):
+            calls.append(video)
+            if 'ep1' in os.path.basename(video) and fail_ep1['on']:
+                return False, 'finalize failed: locked'
+            return True, video
+
+        orig = jobqueue.remux
+        jobqueue.remux = fake_remux
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                v1 = os.path.join(td, 'ep1.mkv')
+                v2 = os.path.join(td, 'ep2.mkv')
+                for v in (v1, v2):
+                    open(v, 'wb').write(b'x')
+                q = QueueManager(state_path=os.path.join(td, 'q.json'))
+                released: list = []
+                q.before_mux = released.append
+                s1 = RenderSettings(out_path=os.path.join(td, 'ep1.en.sup'))
+                s2 = RenderSettings(out_path=os.path.join(td, 'ep2.en.sup'))
+                q.add_render(load_subtitle(sample('basic.srt')), 'a.srt',
+                             s1, OverrideSet(), video_path=v1, lang='en',
+                             start=True)
+                q.add_render(load_subtitle(sample('basic.srt')), 'b.srt',
+                             s2, OverrideSet(), video_path=v2, lang='en',
+                             start=True)
+                q.start()
+                g1, g2 = q.snapshot()
+                deadline = time.time() + 90
+                while time.time() < deadline and not (
+                        g1.mux_state == JobState.FAILED and
+                        g2.mux_state == JobState.DONE):
+                    time.sleep(0.05)
+                self.assertEqual(g1.mux_state, JobState.FAILED)
+                self.assertEqual(g2.mux_state, JobState.DONE,
+                                 'other groups must still mux')
+                # give a broken re-pick loop time to expose itself
+                time.sleep(0.6)
+                n_ep1 = sum(1 for c in calls
+                            if 'ep1' in os.path.basename(c))
+                self.assertEqual(n_ep1, 1, 'failed mux must not loop')
+                self.assertIn(v1, released)
+                self.assertIn(v2, released)
+
+                fail_ep1['on'] = False
+                q.retry_mux(g1.id)
+                deadline = time.time() + 30
+                while time.time() < deadline and \
+                        g1.mux_state != JobState.DONE:
+                    time.sleep(0.05)
+                self.assertEqual(g1.mux_state, JobState.DONE)
+                q.shutdown(wait=True)
+        finally:
+            jobqueue.remux = orig
+
+    def test_mux_finalize_fallback_when_video_locked(self):
+        """Windows-style lock on the original video (player holds it
+        open): finalize must fall back to *.muxed.mkv and report
+        success instead of failing — and never lose the mux output."""
+        import ttml2pgs.core.video as vid
+        with tempfile.TemporaryDirectory() as td:
+            video = os.path.join(td, 'ep.mkv')
+            open(video, 'wb').write(b'ORIG')
+            tmp = os.path.join(td, 'ep.t2p_mux.mkv')
+            open(tmp, 'wb').write(b'MUXED')
+
+            real_remove, real_replace = os.remove, os.replace
+
+            def locked(path):
+                return os.path.abspath(str(path)) == os.path.abspath(video)
+
+            def rm(path, *a, **k):
+                if locked(path):
+                    raise PermissionError(13, 'held by player', path)
+                return real_remove(path, *a, **k)
+
+            def rp(src, dst, *a, **k):
+                if locked(dst):
+                    raise PermissionError(13, 'held by player', dst)
+                return real_replace(src, dst, *a, **k)
+
+            vid.os.remove, vid.os.replace = rm, rp
+            try:
+                ok, res = vid._finalize_mux(tmp, video, video, True,
+                                            delays=(0.0, 0.0))
+            finally:
+                vid.os.remove, vid.os.replace = real_remove, real_replace
+            self.assertTrue(ok, f'fallback should succeed, got: {res}')
+            self.assertTrue(res.endswith('.muxed.mkv'))
+            self.assertEqual(open(res, 'rb').read(), b'MUXED')
+            self.assertEqual(open(video, 'rb').read(), b'ORIG')
+
+            # unlocked: replace-original works normally
+            tmp2 = os.path.join(td, 'ep2.t2p_mux.mkv')
+            v2 = os.path.join(td, 'ep2.mkv')
+            open(tmp2, 'wb').write(b'M2')
+            open(v2, 'wb').write(b'O2')
+            ok, res = vid._finalize_mux(tmp2, v2, v2, True, delays=(0.0,))
+            self.assertTrue(ok)
+            self.assertEqual(res, v2)
+            self.assertEqual(open(v2, 'rb').read(), b'M2')
+
     def test_video_match_streaming_names(self):
         """v1 matched on the first dot-token; names like
         id.jajp.Dialog.Subtitle.ttml must find id.mkv again."""

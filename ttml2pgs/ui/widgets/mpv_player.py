@@ -167,6 +167,17 @@ class MpvPlayerWidget(QWidget):
         if not self._got_media and self._m is not None:
             self.load_failed.emit('mpv could not open this file')
 
+    def unload(self):
+        """Drop the current file, releasing its OS handle (e.g. so a
+        remux can replace the video). The player stays alive."""
+        self._load_check.stop()
+        self._got_media = False
+        if self._m is not None:
+            try:
+                self._m.command('stop')
+            except Exception:
+                pass
+
     # -- transport ------------------------------------------------------ #
     def set_pause(self, paused: bool):
         if self._m is not None:

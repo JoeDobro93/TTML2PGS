@@ -1318,6 +1318,30 @@ class PreviewPane(QWidget):
             except Exception:
                 pass
 
+    def release_video(self, path: str):
+        """Drop any open handle on `path` — its mux is about to replace
+        the file (Windows can't delete/rename a file a player holds
+        open). Playback falls back to stills; re-enable Embed video
+        after the mux to play the updated file."""
+        if not path or not self.video_path:
+            return
+        if os.path.normcase(os.path.abspath(path)) != \
+                os.path.normcase(os.path.abspath(self.video_path)):
+            return
+        if self._mpv is not None:
+            self._mpv.unload()
+        if self._player is not None:
+            try:
+                self._player.stop()
+                self._player.setSource(QUrl())      # releases the handle
+            except Exception:
+                pass
+        if self.chk_player.isChecked():
+            self.chk_player.setChecked(False)       # → stills mode
+            self.lbl_info.setText(
+                'Player released the video for remuxing — re-enable '
+                'Embed video when the mux finishes.')
+
     def _open_player_menu(self):
         menu = QMenu(self)
         act_here = menu.addAction('Open video at selected cue')

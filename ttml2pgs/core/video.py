@@ -13,9 +13,10 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .timing import normalize_fps
 
@@ -314,15 +315,57 @@ def remux(video_path: str, subs: List[SubTrack],
                 pass
         return False, err
 
-    try:
-        if replace_original:
-            os.remove(video_path)
-        elif os.path.exists(final):
-            os.remove(final)
-        os.replace(out_tmp, final)
-    except OSError as e:
-        return False, f"finalize failed: {e}"
-    return True, final
+    return _finalize_mux(out_tmp, video_path, final, replace_original,
+                         progress=progress)
+
+
+#: retry pacing for the finalize step (injectable for tests)
+_FINALIZE_DELAYS = (0.0, 0.5, 1.0, 2.0, 3.0, 3.5)
+
+
+def _finalize_mux(out_tmp: str, video_path: str, final: str,
+                  replace_original: bool,
+                  progress: Optional[Callable[[int, int, str], None]] = None,
+                  delays: Sequence[float] = _FINALIZE_DELAYS
+                  ) -> Tuple[bool, str]:
+    """
+    Swap the finished mux into place. On Windows the original video is
+    often *briefly held open* — the embedded preview player, a media
+    scanner, antivirus — which makes os.remove/os.replace fail even
+    though the mux itself succeeded. So: retry for a few seconds, and
+    if the original stays locked, keep it and deliver `*.muxed.mkv`
+    alongside instead of failing the whole mux.
+    """
+    last: Optional[OSError] = None
+    for d in delays:
+        if d:
+            time.sleep(d)
+            if progress:
+                progress(100, 100, 'Waiting for the video file to be '
+                                   'released…')
+        try:
+            if replace_original:
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+            elif os.path.exists(final):
+                os.remove(final)
+            os.replace(out_tmp, final)
+            return True, final
+        except OSError as e:
+            last = e
+    if replace_original:
+        # original is locked — keep it, deliver alongside (same result
+        # the "replace original" checkbox OFF would give)
+        base = os.path.splitext(final)[0]
+        alt = base + '.muxed.mkv'
+        try:
+            if os.path.exists(alt):
+                os.remove(alt)
+            os.replace(out_tmp, alt)
+            return True, alt
+        except OSError as e:
+            last = e
+    return False, f"finalize failed: {last}"
 
 
 def _remux_mkvmerge(exe, video_path, subs, out_path, progress, cancel

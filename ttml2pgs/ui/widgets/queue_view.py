@@ -243,6 +243,9 @@ class QueuePane(QWidget):
             a_mux = menu.addAction(
                 'Disable mux for this video' if (g and g.mux_enabled)
                 else 'Enable mux for this video')
+            a_retry_mux = menu.addAction('Retry mux')
+            a_retry_mux.setEnabled(bool(
+                g and g.mux_state in (JobState.FAILED, JobState.CANCELED)))
             a_up = menu.addAction('Move group up')
             a_down = menu.addAction('Move group down')
             a_remove = menu.addAction('Remove group')
@@ -251,6 +254,8 @@ class QueuePane(QWidget):
                 self.queue.start_group(ident)
             elif act == a_mux and g:
                 self.queue.set_group_mux(ident, not g.mux_enabled)
+            elif act == a_retry_mux:
+                self.queue.retry_mux(ident)
             elif act == a_up:
                 self.queue.move_group(ident, -1)
             elif act == a_down:

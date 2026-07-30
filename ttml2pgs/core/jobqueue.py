@@ -119,8 +119,11 @@ class VideoGroup:
     def wants_mux(self) -> bool:
         if not self.mux_enabled or self.video_path is None:
             return False
+        # FAILED is terminal here too: without it a failing mux would be
+        # re-picked in a tight loop forever, starving every other group
+        # (retry_mux / new work / toggling mux re-arms it explicitly).
         if self.mux_state in (JobState.DONE, JobState.RUNNING,
-                              JobState.CANCELED):
+                              JobState.CANCELED, JobState.FAILED):
             return False
         if not self.renders_settled():
             return False
@@ -140,6 +143,10 @@ class QueueManager:
         #: after a successful mux, move sources+sups into a 'subs' subfolder
         self.move_to_subs = False
         self.on_change: Optional[Callable[[], None]] = None
+        #: called (from the mux thread) with the video path right before
+        #: its mux starts — the UI uses it to release open file handles
+        #: (an embedded player holding the video blocks replace-original)
+        self.before_mux: Optional[Callable[[str], None]] = None
         self._lock = threading.RLock()
         self._wake = threading.Event()
         self._queue_paused = False
@@ -422,6 +429,19 @@ class QueueManager:
         self._wake.set()
         self._notify()
 
+    def retry_mux(self, group_id: int):
+        """Re-arm a failed/canceled mux (the only way it re-runs)."""
+        with self._lock:
+            for g in self.groups:
+                if g.id == group_id and g.mux_state in (JobState.FAILED,
+                                                        JobState.CANCELED):
+                    g.mux_state = JobState.WAITING
+                    g.mux_error = ''
+                    g.mux_progress = 0.0
+                    g.mux_message = ''
+        self._wake.set()
+        self._notify()
+
     # ------------------------------------------------------------------ #
     def find_job(self, job_id: int) -> Optional[RenderJob]:
         with self._lock:
@@ -557,6 +577,13 @@ class QueueManager:
             self._notify()
             return
 
+        hook = self.before_mux
+        if hook:
+            try:
+                hook(group.video_path)
+            except Exception:
+                pass
+
         def progress(cur, total, msg):
             group.mux_progress = cur / max(1, total)
             group.mux_message = msg
@@ -567,10 +594,16 @@ class QueueManager:
                 except Exception:
                     pass
 
-        ok, res = remux(group.video_path, subs,
-                        replace_original=group.replace_original,
-                        progress=progress,
-                        cancel=lambda: self._stop)
+        try:
+            ok, res = remux(group.video_path, subs,
+                            replace_original=group.replace_original,
+                            progress=progress,
+                            cancel=lambda: self._stop)
+        except Exception as e:
+            # never let a mux crash kill the mux thread — that would
+            # silently stall every remaining group
+            traceback.print_exc()
+            ok, res = False, f'mux crashed: {e}'
         with self._lock:
             if ok:
                 group.mux_state = JobState.DONE

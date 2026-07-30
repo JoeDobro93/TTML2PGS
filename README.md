@@ -124,6 +124,11 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
 * Add a second subtitle for an already-queued video (even mid-render) and
   the group's mux waits for it.
 * Queue **external `.sup` files** for mux-only.
+* A failed mux stays failed (with the error shown) instead of silently
+  retrying — re-run it via **Retry mux** on the group. Before muxing,
+  the embedded player releases the video file, and if something else
+  still holds it locked, the mux lands as `*.muxed.mkv` next to the
+  original rather than failing the batch.
 * Pause / resume / cancel / retry / reorder at queue, group and job
   level; pausing checkpoints between cues and resumes without redoing
   finished cues.

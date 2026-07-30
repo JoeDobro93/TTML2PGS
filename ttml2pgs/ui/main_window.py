@@ -39,6 +39,10 @@ from .widgets.sources import SourcesPane
 
 class MainWindow(QMainWindow):
     queue_changed = pyqtSignal()
+    #: emitted from the mux worker thread just before a video's mux —
+    #: the queued connection releases player file handles on the GUI
+    #: thread (a held-open video blocks replace-original on Windows)
+    release_video_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -50,6 +54,7 @@ class MainWindow(QMainWindow):
 
         self.queue = QueueManager(state_path=self.state.queue_state_path)
         self.queue.on_change = self.queue_changed.emit
+        self.queue.before_mux = self.release_video_requested.emit
         self.queue_changed.connect(self._on_queue_changed,
                                    Qt.ConnectionType.QueuedConnection)
 
@@ -107,6 +112,9 @@ class MainWindow(QMainWindow):
         self.sel_cue_pane.changed.connect(self._cue_style_edited)
         self.settings_pane.overrides_changed.connect(self._overrides_edited)
         self.settings_pane.document_changed.connect(self._doc_edited)
+        self.release_video_requested.connect(
+            self.preview_pane.release_video,
+            Qt.ConnectionType.QueuedConnection)
 
         self._build_menu()
 
