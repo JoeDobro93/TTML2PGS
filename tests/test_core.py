@@ -1056,6 +1056,34 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(pane.tree.topLevelItemCount(), 0)
             self.assertEqual(len(q.snapshot()), 0)
 
+    def test_launcher_assets(self):
+        """Standalone-launch support: the app icon exists and loads,
+        make_shortcut points at real files, the PyInstaller spec and
+        entry point are wired for frozen multiprocessing."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        icon = os.path.join(root, 'resources', 'icon.ico')
+        self.assertTrue(os.path.exists(icon))
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtGui import QImage
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        self.assertFalse(QImage(icon).isNull(), 'icon must be loadable')
+
+        import make_shortcut
+        self.assertTrue(os.path.exists(make_shortcut.SCRIPT))
+        self.assertTrue(os.path.exists(make_shortcut.ICON))
+
+        spec = os.path.join(root, 'ttml2pgs.spec')
+        self.assertTrue(os.path.exists(spec))
+        # the spawn-based worker pool needs freeze_support in the entry
+        src = open(os.path.join(root, 'ttml2pgs', '__main__.py'),
+                   encoding='utf-8').read()
+        self.assertIn('freeze_support', src)
+
     def test_video_match_streaming_names(self):
         """v1 matched on the first dot-token; names like
         id.jajp.Dialog.Subtitle.ttml must find id.mkv again."""

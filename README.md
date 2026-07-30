@@ -31,6 +31,39 @@ should be on PATH. For the embedded preview player, install **libmpv**
 configurable in Settings) — it gives HDR-correct playback; without it
 the preview falls back to Qt Multimedia.
 
+## Launching it like an installed app
+
+Two options, by how often you're still updating the code:
+
+**A. Shortcut into your existing environment (recommended while
+iterating).** One command, no build step, and every `git pull` /
+PyCharm edit is live the next time you double-click:
+
+```bash
+python make_shortcut.py               # Desktop shortcut
+python make_shortcut.py --start-menu  # + Start Menu entry (Windows)
+```
+
+Run it from the interpreter/venv PyCharm uses (PyCharm's Terminal tab
+is already there). On Windows the shortcut targets `pythonw.exe`, so
+no console window appears; it carries the app icon and the right
+working directory. On Linux it installs a `.desktop` launcher.
+
+**B. Fully standalone build (no Python needed to run).** For when the
+app is in a good state and you want a self-contained folder you can
+keep outside the repo:
+
+```bash
+pip install pyinstaller
+pyinstaller ttml2pgs.spec
+```
+
+→ `dist/TTML2PGS/TTML2PGS.exe` (windowed, icon included) — pin a
+shortcut to it anywhere. `ffmpeg`/`mkvmerge` are still found on PATH
+(or drop them next to the exe), and libmpv stays optional via
+Preferences → Player. Remember this snapshot doesn't update with the
+repo: rebuild after pulling changes.
+
 ## What v2 does
 
 ### Parsing — to one editable model

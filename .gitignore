@@ -3,3 +3,6 @@ __pycache__/
 .idea/
 app_settings.json
 compare_out/
+# PyInstaller output
+build/
+dist/
