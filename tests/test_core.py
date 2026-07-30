@@ -547,6 +547,46 @@ class TestPGS(unittest.TestCase):
         self.assertTrue(np.array_equal(solo_a.bitmap, both_a.bitmap))
         self.assertEqual((solo_a.x, solo_a.y), (both_a.x, both_a.y))
 
+    def test_overlap_slicing_keeps_earlier_cue_visible(self):
+        """Time-overlapping cues are sliced into intervals showing ALL
+        active cues — a later cue must never cancel an earlier one
+        (the classic PGS pitfall). Canonical scenario:
+        cue1 2–15s, cue2 3.5–25s, cue3 20.6–24.5s."""
+        c1 = self._mkrender(1, 860, 950, 200, 40)
+        c2 = self._mkrender(2, 860, 880, 200, 40)
+        c3 = self._mkrender(3, 860, 100, 200, 40)
+        events = TimelineBuilder(1920, 1080).build([
+            TimedRender(2000, 15000, c1),
+            TimedRender(3500, 25000, c2),
+            TimedRender(20600, 24500, c3),
+        ], snap_fps=None)
+
+        def visible(ev):
+            out = set()
+            for o in ev.objects:
+                h = o.bitmap.shape[0]
+                for y, uid in ((950, 1), (880, 2), (100, 3)):
+                    if o.y <= y < o.y + h:
+                        out.add(uid)
+            return out
+
+        got = [(ev.start_ms, ev.end_ms, visible(ev)) for ev in events]
+        self.assertEqual(got, [
+            (2000.0, 3500.0, {1}),
+            (3500.0, 15000.0, {1, 2}),
+            (15000.0, 20600.0, {2}),
+            (20600.0, 24500.0, {2, 3}),
+            (24500.0, 25000.0, {2}),
+        ])
+        # the long cue keeps one byte-identical bitmap at one position
+        # through all five slices (no shimmer across boundaries)
+        c2_objs = [o for ev in events[1:] for o in ev.objects
+                   if o.y <= 880 < o.y + o.bitmap.shape[0]]
+        self.assertEqual(len(c2_objs), 4)
+        for o in c2_objs[1:]:
+            self.assertEqual((o.x, o.y), (c2_objs[0].x, c2_objs[0].y))
+            self.assertTrue(np.array_equal(o.bitmap, c2_objs[0].bitmap))
+
     def test_overlapping_boxes_merge(self):
         a = self._mkrender(1, 100, 900, 300, 80)
         b = self._mkrender(2, 200, 940, 300, 80)   # overlaps a
