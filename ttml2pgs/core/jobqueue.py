@@ -391,6 +391,14 @@ class QueueManager:
         self._wake.set()
         self._notify()
 
+    def set_group_replace(self, group_id: int, enabled: bool):
+        """Per-group 'replace original video' (else *.muxed.mkv)."""
+        with self._lock:
+            for g in self.groups:
+                if g.id == group_id:
+                    g.replace_original = bool(enabled)
+        self._notify()
+
     def move_group(self, group_id: int, delta: int):
         with self._lock:
             idx = next((i for i, g in enumerate(self.groups)

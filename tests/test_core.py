@@ -981,6 +981,81 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(res, v2)
             self.assertEqual(open(v2, 'rb').read(), b'M2')
 
+    def test_queue_pane_inplace_refresh_and_aggregates(self):
+        """The queue tree must refresh IN PLACE: selection (and the
+        items themselves) survive progress refreshes. Group rows carry
+        aggregate State/Progress so a collapsed group stays readable."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.queue_view import QueuePane
+        from ttml2pgs.core.jobqueue import QueueManager, JobState
+
+        with tempfile.TemporaryDirectory() as td:
+            v1 = os.path.join(td, 'ep1.mkv')
+            open(v1, 'wb').write(b'x')
+            q = QueueManager()                 # never started: no threads
+            doc = load_subtitle(sample('basic.srt'))
+            s1 = RenderSettings(out_path=os.path.join(td, 'ep1.a.sup'))
+            s2 = RenderSettings(out_path=os.path.join(td, 'ep1.b.sup'))
+            j1 = q.add_render(doc, 'a.srt', s1, OverrideSet(),
+                              video_path=v1, lang='ja')
+            j2 = q.add_render(doc, 'b.srt', s2, OverrideSet(),
+                              video_path=v1, lang='en')
+
+            pane = QueuePane(q, app_settings={})
+            pane.refresh()
+            gi = pane.tree.topLevelItem(0)
+            self.assertEqual(pane.tree.topLevelItemCount(), 1)
+            self.assertEqual(gi.childCount(), 2)
+            self.assertEqual(gi.text(1), '0/2 · 2 added')
+            self.assertEqual(gi.text(2), '0%')
+
+            # select both jobs, then simulate progress refreshes
+            c1, c2 = gi.child(0), gi.child(1)
+            c1.setSelected(True)
+            c2.setSelected(True)
+            j1.progress = 0.5
+            pane.refresh()
+            pane.refresh()
+            self.assertIs(gi, pane.tree.topLevelItem(0),
+                          'items must be updated in place, not rebuilt')
+            self.assertIs(c1, gi.child(0))
+            self.assertTrue(c1.isSelected() and c2.isSelected(),
+                            'selection must survive refresh')
+            self.assertEqual(gi.text(2), '25%')     # (0.5 + 0) / 2
+
+            # finished group: aggregate flips to done/100%
+            for j in (j1, j2):
+                j.state = JobState.DONE
+                j.progress = 1.0
+            g = q.snapshot()[0]
+            g.mux_state = JobState.DONE
+            pane.refresh()
+            self.assertEqual(gi.text(1), '2/2 · done')
+            self.assertEqual(gi.text(2), '100%')
+
+            # replace-original toggle shows the delivery hint
+            q.set_group_replace(g.id, False)
+            pane.refresh()
+            self.assertIn('*.muxed.mkv', gi.text(3))
+            self.assertFalse(g.replace_original)
+
+            # group + one job selected: job ids dedup to the group's set
+            gi.setSelected(True)
+            self.assertEqual(sorted(pane._selected_job_ids()),
+                             sorted([j1.id, j2.id]))
+
+            # Del removes the selection (group selected → whole group)
+            pane._remove_selected()
+            pane.refresh()
+            self.assertEqual(pane.tree.topLevelItemCount(), 0)
+            self.assertEqual(len(q.snapshot()), 0)
+
     def test_video_match_streaming_names(self):
         """v1 matched on the first dot-token; names like
         id.jajp.Dialog.Subtitle.ttml must find id.mkv again."""

@@ -65,7 +65,10 @@ class MainWindow(QMainWindow):
         self.preview_pane = PreviewPane()
         self.settings_pane = SettingsPane(self.state.overrides,
                                           self.state.settings)
-        self.queue_pane = QueuePane(self.queue)
+        self.queue_pane = QueuePane(self.queue, self.state.settings)
+        self.queue.move_to_subs = self.state.settings.get(
+            'move_to_subs_folder', False)
+        self.queue_pane.settings_changed.connect(self._queue_settings_edited)
 
         # cue table + the collapsible selected-cue editor share a column
         # so expanding the editor borrows space from the table
@@ -261,7 +264,21 @@ class MainWindow(QMainWindow):
 
     def _overrides_edited(self):
         self.state.save_settings()
+        # keep the queue's live option in step with the settings pane
+        self.queue.move_to_subs = self.state.settings.get(
+            'move_to_subs_folder', False)
         self.preview_pane.schedule_render()
+
+    def _queue_settings_edited(self):
+        """Queue-pane option toggles (e.g. move-to-subs): persist and
+        mirror the checkbox in the settings pane."""
+        self.state.save_settings()
+        chk = getattr(self.settings_pane, 'chk_move', None)
+        if chk is not None:
+            chk.blockSignals(True)
+            chk.setChecked(self.state.settings.get(
+                'move_to_subs_folder', False))
+            chk.blockSignals(False)
 
     def _autosave(self):
         self.state.save_settings()

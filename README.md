@@ -129,6 +129,15 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   the embedded player releases the video file, and if something else
   still holds it locked, the mux lands as `*.muxed.mkv` next to the
   original rather than failing the batch.
+* The tree updates **in place** — multi-selection, the shift-click
+  anchor and scroll position survive live progress updates. **Del**
+  removes the selection; the right-click menu adapts to it (bulk
+  Start/Pause/Resume-Retry/Cancel/Remove on multi-select), right-click
+  on empty space gets queue-wide options (start all, expand/collapse,
+  move-to-subs). Columns resize individually. Group rows aggregate
+  their children — `2/3 · rendering`, live render %, then `mux 45%` —
+  so collapsed groups stay readable. Per-group **mux** and **replace
+  original** toggles live in the group's context menu.
 * Pause / resume / cancel / retry / reorder at queue, group and job
   level; pausing checkpoints between cues and resumes without redoing
   finished cues.
