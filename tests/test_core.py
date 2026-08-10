@@ -2447,6 +2447,86 @@ class TestMergeMode(unittest.TestCase):
                              os.path.abspath(p2))
             self.assertIn('two', st.sessions[0].doc.cues[0].plain_text())
 
+    def test_overlap_highlight_and_filter(self):
+        """Timestamp cells of time-overlapping cues are tinted (not the
+        whole row) and the Start/End header filter can isolate
+        overlapping / non-overlapping cues."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.cue_table import (
+            CueModel, CueFilterProxy, COL_START, COL_END, COL_TEXT)
+
+        doc = SubtitleDocument()
+        times = [(2000, 15000), (3500, 25000), (20600, 24500),
+                 (30000, 31000),          # lone cue
+                 (31000, 32000)]          # touches previous — NOT overlap
+        for b, e in times:
+            c = Cue(begin_ms=b, end_ms=e)
+            c.root.children.append(SpanNode.text_node('x'))
+            doc.cues.append(c)
+        model = CueModel()
+        model.set_document(doc)
+        over = [c.uid in model._overlaps for c in model.cues]
+        self.assertEqual(over, [True, True, True, False, False])
+
+        # tint on the timestamp cells only
+        bg_start = model.data(model.index(0, COL_START),
+                              Qt.ItemDataRole.BackgroundRole)
+        bg_text = model.data(model.index(0, COL_TEXT),
+                             Qt.ItemDataRole.BackgroundRole)
+        bg_lone = model.data(model.index(3, COL_END),
+                             Qt.ItemDataRole.BackgroundRole)
+        self.assertIsNotNone(bg_start)
+        self.assertIsNone(bg_text)
+        self.assertIsNone(bg_lone)
+        tip = model.data(model.index(0, COL_START),
+                         Qt.ItemDataRole.ToolTipRole)
+        self.assertIn('#2', tip)
+
+        proxy = CueFilterProxy()
+        proxy.setSourceModel(model)
+        proxy.set_overlap_value(True)
+        self.assertEqual(proxy.rowCount(), 3)
+        proxy.set_overlap_value(False)
+        self.assertEqual(proxy.rowCount(), 2)
+        proxy.set_overlap_value(None)
+        self.assertEqual(proxy.rowCount(), 5)
+
+        # a timing edit re-evaluates overlap state
+        model.setData(model.index(3, COL_START), '00:00:24.000')
+        self.assertIn(model.cues[3].uid, model._overlaps)
+
+    def test_merge_bakes_differing_source_timing(self):
+        """Offsets/conform applied to a source before merging are baked
+        into its cues so both languages stay in sync in one job."""
+        from ttml2pgs.core.merge import bake_timing, merge_documents
+        from fractions import Fraction as F
+        with tempfile.TemporaryDirectory() as td:
+            f = self._fixture(td)
+            p = load_subtitle(f['ja1'])
+            s = load_subtitle(f['enf1'])
+            # secondary nudged +500ms and PAL-conformed
+            plan = RetimePlan(scale=F(25, 24), offset_ms=0.0,
+                              description='24→25')
+            bake_timing(s, plan, 500.0)
+            first = s.cues[0]
+            self.assertAlmostEqual(first.begin_ms,
+                                   1700 * 25 / 24 + 500, places=3)
+            self.assertIsNone(s.fps)
+            m = merge_documents(p, s, 'ja', 'en+forced')
+            en = [c for c in m.cues if c.lang == 'en']
+            self.assertAlmostEqual(min(c.begin_ms for c in en),
+                                   1700 * 25 / 24 + 500, places=3)
+            # primary untouched
+            ja = [c for c in m.cues if c.lang == 'ja']
+            self.assertEqual(min(c.begin_ms for c in ja), 2000.0)
+
     def test_merge_dialog_offscreen(self):
         try:
             import PyQt6  # noqa: F401

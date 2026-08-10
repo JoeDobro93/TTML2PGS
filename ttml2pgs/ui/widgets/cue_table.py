@@ -101,6 +101,8 @@ class CueModel(QAbstractTableModel):
         self.doc: Optional[SubtitleDocument] = None
         self.cues: List[Cue] = []
         self._previews: dict = {}          # id(cue) -> display text
+        #: cue uid -> display numbers of the cues it overlaps in time
+        self._overlaps: dict = {}
         #: optional provider of the current selection — region/style edits
         #: on a selected row apply to every selected cue
         self.bulk_targets = None
@@ -110,6 +112,7 @@ class CueModel(QAbstractTableModel):
         self.doc = doc
         self.cues = doc.sorted_cues() if doc else []
         self._previews.clear()
+        self._recompute_overlaps()
         self.endResetModel()
 
     def refresh_order(self):
@@ -117,7 +120,27 @@ class CueModel(QAbstractTableModel):
         if self.doc:
             self.cues = self.doc.sorted_cues()
         self._previews.clear()
+        self._recompute_overlaps()
         self.endResetModel()
+
+    def _recompute_overlaps(self):
+        """SubtitleEdit-style overlap map: uid -> row numbers (1-based)
+        of every cue sharing screen time. Touching cues (end == next
+        start) do NOT count as overlapping."""
+        self._overlaps = {}
+        order = sorted(range(len(self.cues)),
+                       key=lambda i: self.cues[i].begin_ms)
+        for a in range(len(order)):
+            ca = self.cues[order[a]]
+            for b in range(a + 1, len(order)):
+                cb = self.cues[order[b]]
+                if cb.begin_ms >= ca.end_ms:
+                    break
+                if ca.begin_ms < cb.end_ms:      # strict overlap
+                    self._overlaps.setdefault(ca.uid, []).append(
+                        order[b] + 1)
+                    self._overlaps.setdefault(cb.uid, []).append(
+                        order[a] + 1)
 
     def preview(self, cue: Cue) -> str:
         text = self._previews.get(id(cue))
@@ -184,6 +207,20 @@ class CueModel(QAbstractTableModel):
             f = QFont()
             f.setItalic(True)
             return f
+        # SubtitleEdit-style: tint the TIMESTAMP cells of overlapping
+        # cues (not the whole row)
+        if c in (COL_START, COL_END) and cue.uid in self._overlaps:
+            if role == Qt.ItemDataRole.BackgroundRole:
+                from PyQt6.QtGui import QBrush, QColor
+                return QBrush(QColor('#6b4a12'))     # amber, dark-theme
+            if role == Qt.ItemDataRole.ToolTipRole:
+                rows = self._overlaps[cue.uid]
+                shown = ', '.join(f'#{r}' for r in rows[:12])
+                if len(rows) > 12:
+                    shown += ', …'
+                return (f'Overlaps cue(s) {shown} in time.\n'
+                        f'Click the Start/End header to filter '
+                        f'overlapping / non-overlapping cues.')
         if role == Qt.ItemDataRole.CheckStateRole and c == COL_ON:
             return Qt.CheckState.Checked if cue.enabled \
                 else Qt.CheckState.Unchecked
@@ -258,7 +295,13 @@ class CueModel(QAbstractTableModel):
             self._previews.pop(id(cue), None)
         else:
             return False
-        if many:
+        if c in (COL_START, COL_END):
+            # timing changed: overlap state may flip anywhere
+            self._recompute_overlaps()
+            self.dataChanged.emit(
+                self.index(0, COL_START),
+                self.index(self.rowCount() - 1, COL_END))
+        elif many:
             self.dataChanged.emit(
                 self.index(0, c), self.index(self.rowCount() - 1, c))
         else:
@@ -344,9 +387,14 @@ class CueFilterProxy(QSortFilterProxyModel):
         self.region_value: Optional[str] = None    # '(default)' | region id
         self.style_value: Optional[str] = None     # 'default' | style id
         self.lang_value: Optional[str] = None      # merged docs: cue.lang
+        self.overlap_value: Optional[bool] = None  # True=only overlapping
 
     def set_text(self, text: str):
         self.text = text.lower()
+        self.invalidateFilter()
+
+    def set_overlap_value(self, value: Optional[bool]):
+        self.overlap_value = value
         self.invalidateFilter()
 
     def set_region_value(self, value: Optional[str]):
@@ -370,6 +418,9 @@ class CueFilterProxy(QSortFilterProxyModel):
             doc = getattr(model, 'doc', None)
             lang = cue.lang or (doc.language if doc else '')
             if lang != self.lang_value:
+                return False
+        if self.overlap_value is not None:
+            if (cue.uid in model._overlaps) != self.overlap_value:
                 return False
         if self.region_value is not None:
             rid = cue.region_id or '(default)'
@@ -465,7 +516,8 @@ class CuePane(QWidget):
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._header_clicked)
         hh.setToolTip('Click the Region or Style header to filter by '
-                      'value. Style filtering matches styles used '
+                      'value; click Start or End to filter by TIME '
+                      'OVERLAP. Style filtering matches styles used '
                       'anywhere in the cue, including inside the line.')
         self.btn_add.clicked.connect(self.add_cue)
         self.btn_del.clicked.connect(self.delete_selected)
@@ -483,6 +535,9 @@ class CuePane(QWidget):
         self.model.set_document(doc)
         self._set_col_filter(COL_REGION, None)
         self._set_col_filter(COL_STYLE, None)
+        self.proxy.set_overlap_value(None)
+        self.model.filtered_cols = \
+            self.model.filtered_cols - {COL_START, COL_END}
         self._sync_lang_tools()
         sel = self.table.selectionModel()
         if sel:
@@ -581,7 +636,40 @@ class CuePane(QWidget):
         self.model.headerDataChanged.emit(Qt.Orientation.Horizontal,
                                           col, col)
 
+    def _overlap_header_menu(self, section: int):
+        menu = QMenu(self)
+        t = menu.addAction('Filter by time overlap')
+        t.setEnabled(False)
+        menu.addSeparator()
+        cur = self.proxy.overlap_value
+        opts = [('(no filter)', None), ('Overlapping cues', True),
+                ('Non-overlapping cues', False)]
+        acts = {}
+        for label, val in opts:
+            a = menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(cur is val)
+            acts[a] = val
+        from PyQt6.QtCore import QPoint
+        hh = self.table.horizontalHeader()
+        pos = hh.mapToGlobal(QPoint(hh.sectionViewportPosition(section),
+                                    hh.height()))
+        chosen = menu.exec(pos)
+        if chosen is None or chosen not in acts:
+            return
+        val = acts[chosen]
+        self.proxy.set_overlap_value(val)
+        cols = set(self.model.filtered_cols)
+        for c in (COL_START, COL_END):
+            (cols.add if val is not None else cols.discard)(c)
+        self.model.filtered_cols = cols
+        self.model.headerDataChanged.emit(Qt.Orientation.Horizontal,
+                                          COL_START, COL_END)
+
     def _header_clicked(self, section: int):
+        if section in (COL_START, COL_END) and self.doc is not None:
+            self._overlap_header_menu(section)
+            return
         if self.doc is None or section not in (COL_REGION, COL_STYLE):
             return
         menu = QMenu(self)

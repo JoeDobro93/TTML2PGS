@@ -428,8 +428,24 @@ class SourcesPane(QWidget):
                           if s.sub_path == p_path)
             s_sess = next(s for s in self.state.sessions
                           if s.sub_path == s_path)
-            p_sess.doc = merge_documents(
-                p_sess.doc, s_sess.doc, prim, sec)
+            # honor per-source timing (offset / fps conform): when the
+            # two sides differ, bake each side's transform into its
+            # cues so the merged job needs only one timing
+            p_doc, s_doc = p_sess.doc, s_sess.doc
+            p_plan, s_plan = p_sess.retime_plan(), s_sess.retime_plan()
+            if (p_sess.offset_ms != s_sess.offset_ms or
+                    p_plan != s_plan):
+                import copy as _copy
+                from ...core.merge import bake_timing
+                p_doc = _copy.deepcopy(p_doc)
+                s_doc = _copy.deepcopy(s_doc)
+                bake_timing(p_doc, p_plan, p_sess.offset_ms)
+                bake_timing(s_doc, s_plan, s_sess.offset_ms)
+                p_sess.offset_ms = 0.0
+                p_sess.use_manual_conform = True   # baked: no re-conform
+                p_sess.manual_src_fps = None
+                p_sess.manual_dst_fps = None
+            p_sess.doc = merge_documents(p_doc, s_doc, prim, sec)
             p_sess.merged_from = [os.path.basename(p_path),
                                   os.path.basename(s_path)]
             p_sess.out_path = merged_out_path(

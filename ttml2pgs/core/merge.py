@@ -188,6 +188,26 @@ def merged_out_path(primary_path: str, video_path: Optional[str],
     return os.path.join(base_dir, f'{stem}.{ptag}+{stag}.sup')
 
 
+def bake_timing(doc: SubtitleDocument, plan, offset_ms: float) -> None:
+    """
+    Apply a session's render-time timing transform (fps conform +
+    global offset) directly onto the document's cue timestamps.
+
+    Used before merging when the two sources carry DIFFERENT offsets
+    or conform plans — a single merged render job can only apply one
+    transform, so per-source timing must be baked in first to keep the
+    languages in sync. Mutates `doc` (callers pass a copy).
+    """
+    for cue in doc.cues:
+        b, e = cue.begin_ms, cue.end_ms
+        if plan is not None:
+            b, e = plan.apply(b), plan.apply(e)
+        cue.begin_ms, cue.end_ms = b + offset_ms, e + offset_ms
+    # timestamps are now in the target timebase — drop the declared fps
+    # so nothing re-suggests the conform on top
+    doc.fps = None
+
+
 # --------------------------------------------------------------------------- #
 # Timestamp snapping
 # --------------------------------------------------------------------------- #
