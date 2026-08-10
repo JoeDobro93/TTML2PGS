@@ -136,7 +136,9 @@ class CollapsibleSection(QWidget):
         lay.setContentsMargins(0, 2, 0, 2)
         lay.setSpacing(2)
         self.btn = QToolButton()
-        self.btn.setText(title)
+        # '&' is Qt's mnemonic marker — escape so titles like
+        # "Outline & shadow" display the literal ampersand
+        self.btn.setText(title.replace('&', '&&'))
         self.btn.setCheckable(True)
         self.btn.setChecked(expanded)
         self.btn.setToolButtonStyle(
@@ -350,7 +352,8 @@ class OverrideEditor(QWidget):
     section_toggled = pyqtSignal(str, bool)
 
     def __init__(self, so: StyleOverrides,
-                 sec_state: Optional[Dict[str, bool]] = None):
+                 sec_state: Optional[Dict[str, bool]] = None,
+                 is_default: bool = False):
         super().__init__()
         self.so = so
         self._sec_state = sec_state if sec_state is not None else {}
@@ -358,6 +361,18 @@ class OverrideEditor(QWidget):
         outer.setContentsMargins(6, 2, 4, 4)
         outer.setSpacing(0)
         self.sections: Dict[str, CollapsibleSection] = {}
+
+        # language tabs get a master switch; while off, the language
+        # follows the Default tab and everything below is greyed out
+        self.chk_enabled: Optional[QCheckBox] = None
+        if not is_default:
+            self.chk_enabled = QCheckBox(
+                'Use these overrides for this language '
+                '(unchecked = follow Default)')
+            self.chk_enabled.setStyleSheet('font-weight: bold;')
+            self.chk_enabled.setChecked(so.enabled)
+            self.chk_enabled.toggled.connect(self._enabled_toggled)
+            outer.addWidget(self.chk_enabled)
 
         # the editor must never stretch taller than its content, or the
         # tab page keeps its expanded height when sections collapse
@@ -569,7 +584,20 @@ class OverrideEditor(QWidget):
         self.spin_pv.valueChanged.connect(self._commit)
         self.spin_ph.valueChanged.connect(self._commit)
         self.spin_lspace.valueChanged.connect(self._commit)
+        # when the page is forced taller than its content (the tab
+        # stack fills its area), the leftover collects HERE instead of
+        # spreading between the section headers
+        outer.addStretch(1)
+        if self.chk_enabled is not None and not so.enabled:
+            for sec in self.sections.values():
+                sec.setEnabled(False)
         guard_wheel_children(self)
+
+    def _enabled_toggled(self, on: bool):
+        self.so.enabled = bool(on)
+        for sec in self.sections.values():
+            sec.setEnabled(on)
+        self.changed.emit()
 
     def _section_toggled(self, name: str, on: bool):
         self._sec_state[name] = on
@@ -1135,6 +1163,10 @@ class SettingsPane(QWidget):
         rl = QVBoxLayout(leftr)
         rl.setContentsMargins(2, 2, 2, 2)
         self.region_list = QListWidget()
+        # grey position hints (bottom / top / vertical right …) like
+        # the Styles list
+        self.region_list.setItemDelegate(
+            HintItemDelegate(self.region_list))
         rl.addWidget(self.region_list)
         rowrb = QHBoxLayout()
         rb_add = QPushButton('Add')
@@ -1183,7 +1215,7 @@ class SettingsPane(QWidget):
         for lang in sorted(self.overrides.by_lang.keys(),
                            key=lambda x: (x != '', x)):
             so = self.overrides.by_lang[lang]
-            ed = OverrideEditor(so, self._sec_state)
+            ed = OverrideEditor(so, self._sec_state, is_default=(lang == ''))
             ed.changed.connect(self.overrides_changed.emit)
             ed.section_toggled.connect(self._sync_sections)
             # the editor sits directly in the tab — the whole overrides
@@ -1200,6 +1232,7 @@ class SettingsPane(QWidget):
                 self.lang_tabs.setCurrentIndex(i)
                 break
         self.lang_tabs.blockSignals(False)
+        self._update_lang_tabs_height()
 
     def ensure_language_tab(self, lang: str):
         if not lang:
@@ -1208,6 +1241,19 @@ class SettingsPane(QWidget):
         shown = {self.lang_tabs.tabText(i)
                  for i in range(self.lang_tabs.count())}
         if lang not in shown:
+            self._rebuild_lang_tabs()
+
+    def ensure_language_tabs(self, langs):
+        """A tab for every open subtitle language — DISABLED (following
+        Default) until its 'use these overrides' toggle is turned on,
+        so auto-created tabs never hijack Default edits."""
+        added = False
+        for lang in langs:
+            lang = (lang or '').strip()
+            if lang and lang not in self.overrides.by_lang:
+                self.overrides.ensure_language(lang, enabled=False)
+                added = True
+        if added:
             self._rebuild_lang_tabs()
 
     def _add_lang_tab(self):
@@ -1242,6 +1288,22 @@ class SettingsPane(QWidget):
             sec = getattr(ed, 'sections', {}).get(name)
             if sec is not None:
                 sec.set_expanded(on)
+        self._update_lang_tabs_height()
+
+    def _update_lang_tabs_height(self):
+        """Hard-cap the language tab box at its content height so
+        collapsing sections visibly shrinks it (a QTabWidget left to
+        its own devices keeps the tallest-ever page height)."""
+        from PyQt6.QtCore import QTimer
+
+        def apply():
+            ed = self.lang_tabs.currentWidget()
+            if ed is None:
+                return
+            h = ed.sizeHint().height() + \
+                self.lang_tabs.tabBar().sizeHint().height() + 10
+            self.lang_tabs.setMaximumHeight(max(60, h))
+        QTimer.singleShot(0, apply)      # let layouts settle first
 
     def refresh_style_hints(self):
         for i in range(self.style_list.count()):
@@ -1258,7 +1320,16 @@ class SettingsPane(QWidget):
         if doc:
             for sid in sorted(doc.styles.keys()):
                 self.style_list.addItem(self._style_item(sid))
-            self.region_list.addItems(list(doc.regions.keys()))
+            from ...core.renderer import classify_region_position
+            for rid in doc.regions.keys():
+                it = QListWidgetItem(rid)
+                try:
+                    it.setData(Qt.ItemDataRole.UserRole,
+                               classify_region_position(
+                                   doc, doc.regions[rid]))
+                except Exception:
+                    pass
+                self.region_list.addItem(it)
             self.initial_editor.load(doc.initial)
             # deliberately NO ensure_language_tab here: languages follow
             # Default until the user adds a tab via '+' themselves

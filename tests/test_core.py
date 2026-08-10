@@ -2591,6 +2591,88 @@ class TestMergeMode(unittest.TestCase):
             ja = [c for c in m.cues if c.lang == 'ja']
             self.assertEqual(min(c.begin_ms for c in ja), 2000.0)
 
+    def test_classify_region_positions(self):
+        """Region → screen position: bottom band → 'bottom', top band →
+        'top', tbrl column on the right → 'vertical right'."""
+        from ttml2pgs.core.renderer import (classify_region_position,
+                                            REGION_POSITION_PRIORITY)
+        doc = load_subtitle(sample('netflix_ja.ttml'))
+        pos = {rid: classify_region_position(doc, r)
+               for rid, r in doc.regions.items()}
+        # region0: y=70% h=20% (text bottom-aligned) → bottom
+        self.assertEqual(pos['region0'], 'bottom')
+        # region1: y=10% h=20% → top
+        self.assertEqual(pos['region1'], 'top')
+        # region2: tbrl at x=75% w=20% → vertical right
+        self.assertEqual(pos['region2'], 'vertical right')
+        self.assertLess(REGION_POSITION_PRIORITY['bottom'],
+                        REGION_POSITION_PRIORITY['vertical right'])
+        self.assertLess(REGION_POSITION_PRIORITY['top'],
+                        REGION_POSITION_PRIORITY['center'])
+
+    def test_align_same_language_and_closest_boundary(self):
+        """Within one language a top-region cue aligns to the
+        bottom-region cue; among several boundaries in threshold the
+        CLOSEST wins."""
+        from ttml2pgs.core.merge import (align_overlaps,
+                                         align_same_language_overlaps,
+                                         _nearest_bound)
+        from ttml2pgs.core.model import Region
+        from ttml2pgs.core.units import Dim
+
+        # closest-boundary preference (both within threshold)
+        self.assertEqual(_nearest_bound(5000.0, [4800.0, 5300.0], 500.0),
+                         4800.0)
+        self.assertEqual(_nearest_bound(5200.0, [4800.0, 5300.0], 500.0),
+                         5300.0)
+
+        doc = SubtitleDocument()
+        doc.language = 'ja'
+        doc.regions['bot'] = Region(id='bot', x=Dim(10, '%'),
+                                    y=Dim(70, '%'), width=Dim(80, '%'),
+                                    height=Dim(20, '%'))
+        doc.regions['top'] = Region(id='top', x=Dim(10, '%'),
+                                    y=Dim(10, '%'), width=Dim(80, '%'),
+                                    height=Dim(20, '%'))
+
+        def cue(b, e, rid):
+            c = Cue(begin_ms=b, end_ms=e, region_id=rid)
+            c.root.children.append(SpanNode.text_node('x'))
+            c.lang = 'ja'
+            doc.cues.append(c)
+            return c
+
+        dialog = cue(2000, 5000, 'bot')          # reference (bottom)
+        note = cue(1700, 5200, 'top')            # top note, both edges off
+        far = cue(9000, 10000, 'top')            # no overlap — untouched
+        n = align_same_language_overlaps(doc, 500.0)
+        self.assertEqual(n, 1)
+        self.assertEqual((note.begin_ms, note.end_ms), (2000.0, 5000.0))
+        self.assertEqual((dialog.begin_ms, dialog.end_ms),
+                         (2000.0, 5000.0))       # reference unchanged
+        self.assertEqual((far.begin_ms, far.end_ms), (9000.0, 10000.0))
+        # align_overlaps on a single-language doc = same-language pass
+        self.assertEqual(align_overlaps(doc, 'ja', 500.0), 0)
+
+    def test_language_set_enable_toggle(self):
+        """A disabled language set follows Default entirely; enabling
+        it activates its own values (auto-created tabs start off)."""
+        ov = OverrideSet()
+        ov.by_lang[''].override_font_size = True
+        ov.by_lang[''].font_size = Dim(5, 'vh')
+        so = ov.ensure_language('ja', enabled=False)
+        so.font_size = Dim(9, 'vh')
+        self.assertIs(ov.for_language('ja'), ov.by_lang[''])
+        self.assertIs(ov.for_language('ja-JP'), ov.by_lang[''])
+        so.enabled = True
+        self.assertIs(ov.for_language('ja'), so)
+        # round-trips through serialization
+        ov2 = OverrideSet.from_dict(ov.to_dict())
+        self.assertTrue(ov2.by_lang['ja'].enabled)
+        ov2.by_lang['ja'].enabled = False
+        ov3 = OverrideSet.from_dict(ov2.to_dict())
+        self.assertFalse(ov3.by_lang['ja'].enabled)
+
     def test_cross_format_merge_and_t2p_roundtrip(self):
         """Merge is format-agnostic (everything parses into the same
         model): TTML + VTT merge, and the result survives a .t2p
@@ -2686,9 +2768,14 @@ class TestMergeMode(unittest.TestCase):
         dlg.lst_secondary.item(2).setSelected(True)    # en (forced)
         self.assertTrue(ok.isEnabled())
         dlg.chk_close.setChecked(False)
+        dlg.chk_snap.setChecked(True)
+        dlg.spin_snap.setValue(0.75)
         dlg.accept()
         self.assertEqual(dlg.choice(), ('ja', 'en+forced', False))
+        self.assertEqual(dlg.snap_choice(), (True, 0.75))
         self.assertFalse(settings['merge_close_unused'])
+        self.assertTrue(settings['merge_snap'])
+        self.assertEqual(settings['merge_snap_threshold'], 0.75)
 
 
 if __name__ == '__main__':

@@ -74,6 +74,27 @@ class _MergeDialog(QDialog):
             bool(app_settings.get('merge_close_unused', True)))
         lay.addWidget(self.chk_close)
 
+        row_snap = QHBoxLayout()
+        self.chk_snap = QCheckBox('Align overlaps after merging — '
+                                  'threshold (s):')
+        self.chk_snap.setToolTip(
+            'Snap the secondary language\'s cue edges to the primary\'s '
+            'cue boundaries (and align same-language overlaps by region '
+            'position) right after each merge.')
+        self.chk_snap.setChecked(
+            bool(app_settings.get('merge_snap', False)))
+        from PyQt6.QtWidgets import QDoubleSpinBox
+        self.spin_snap = QDoubleSpinBox()
+        self.spin_snap.setRange(0.05, 10.0)
+        self.spin_snap.setSingleStep(0.05)
+        self.spin_snap.setDecimals(2)
+        self.spin_snap.setValue(
+            float(app_settings.get('merge_snap_threshold', 0.5)))
+        row_snap.addWidget(self.chk_snap)
+        row_snap.addWidget(self.spin_snap)
+        row_snap.addStretch()
+        lay.addLayout(row_snap)
+
         self.btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok |
             QDialogButtonBox.StandardButton.Cancel)
@@ -98,12 +119,19 @@ class _MergeDialog(QDialog):
     def accept(self):
         self.app_settings['merge_close_unused'] = \
             self.chk_close.isChecked()
+        self.app_settings['merge_snap'] = self.chk_snap.isChecked()
+        self.app_settings['merge_snap_threshold'] = \
+            self.spin_snap.value()
         super().accept()
 
     def choice(self):
         return (self._sel(self.lst_primary),
                 self._sel(self.lst_secondary),
                 self.chk_close.isChecked())
+
+    def snap_choice(self):
+        """(align_after_merge, threshold_seconds)"""
+        return self.chk_snap.isChecked(), self.spin_snap.value()
 
 
 def _parse_fps(text: str):
@@ -143,6 +171,7 @@ class SourcesPane(QWidget):
         b_folder = QPushButton('Add folder…')
         b_sup = QPushButton('Queue external .sup…')
         b_close = QPushButton('Close selected')
+        b_close_all = QPushButton('Close all…')
         b_merge = QPushButton('Merge selected…')
         b_merge.setToolTip(
             'Merge two languages per episode into ONE subtitle (e.g. '
@@ -154,6 +183,7 @@ class SourcesPane(QWidget):
         bar.addWidget(b_folder)
         bar.addWidget(b_sup)
         bar.addWidget(b_close)
+        bar.addWidget(b_close_all)
         bar.addWidget(b_merge)
         bar.addStretch()
         from PyQt6.QtWidgets import QCheckBox
@@ -203,6 +233,7 @@ class SourcesPane(QWidget):
         b_folder.clicked.connect(self._add_folder)
         b_sup.clicked.connect(self._add_external_sup)
         b_close.clicked.connect(self._close_selected)
+        b_close_all.clicked.connect(self._close_all)
         b_merge.clicked.connect(self._merge_selected)
         self.b_render.clicked.connect(self._render_selected)
         self.b_render_all.clicked.connect(self.render_all_requested.emit)
@@ -383,6 +414,21 @@ class SourcesPane(QWidget):
         self.refresh()
         self.session_activated.emit(self.state.active_index)
 
+    def _close_all(self):
+        from PyQt6.QtWidgets import QMessageBox
+        n = len(self.state.sessions)
+        if not n:
+            return
+        if QMessageBox.question(
+                self, 'Close all',
+                f'Close all {n} subtitle(s)?') != \
+                QMessageBox.StandardButton.Yes:
+            return
+        for i in reversed(range(n)):
+            self.state.close_session(i)
+        self.refresh()
+        self.session_activated.emit(self.state.active_index)
+
     def _render_selected(self):
         for row in self._selected_rows():
             self.render_requested.emit(row)
@@ -419,6 +465,7 @@ class SourcesPane(QWidget):
         if not dlg.exec():
             return
         prim, sec, close_unused = dlg.choice()
+        do_snap, snap_s = dlg.snap_choice()
 
         to_close: List[str] = []
         first_merged: Optional[DocumentSession] = None
@@ -446,6 +493,10 @@ class SourcesPane(QWidget):
                 p_sess.manual_src_fps = None
                 p_sess.manual_dst_fps = None
             p_sess.doc = merge_documents(p_doc, s_doc, prim, sec)
+            if do_snap:
+                from ...core.merge import align_overlaps
+                align_overlaps(p_sess.doc, p_sess.doc.language,
+                               snap_s * 1000.0)
             p_sess.merged_from = [os.path.basename(p_path),
                                   os.path.basename(s_path)]
             p_sess.out_path = merged_out_path(

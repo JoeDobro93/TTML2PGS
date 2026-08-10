@@ -129,6 +129,74 @@ def compute_canvas(video_res: Optional[Tuple[int, int]],
     return CanvasSpec(cw, ch, cx, cy, cwid, chei, pad_x, pad_y)
 
 
+#: alignment-priority order for region positions (lower = wins as the
+#: reference when aligning overlapping cues): bottom dialogue first,
+#: then vertical right/left, top, and centered-in-centered last
+REGION_POSITION_PRIORITY = {'bottom': 0, 'vertical right': 1,
+                            'vertical left': 2, 'top': 3, 'center': 4}
+
+
+def classify_region_position(doc: SubtitleDocument, region: Region) -> str:
+    """
+    'bottom' / 'top' / 'vertical right' / 'vertical left' / 'center' —
+    which screen area a region's TEXT anchors to.
+
+    Horizontal text: the display-aligned edge of the region box (top
+    edge for `before`, bottom for `after`, center line for `center`)
+    against the canvas midline. Vertical text (tbrl/tblr): the same
+    idea on the horizontal axis — columns anchor at the right edge for
+    tbrl / left for tblr. A centered region with centered text is
+    'center'.
+    """
+    from dataclasses import replace as dc_replace
+    from .overrides import OverrideSet
+
+    canvas = compute_canvas(None, OverrideSet().layout)
+    r = CueRenderer(doc, canvas)
+    spec = doc.specified_style(region.style_refs, region.style)
+    wm = spec.writing_mode or ''
+    vertical = wm.startswith('tb')
+
+    # shrink-wrap regions: fill missing extents like the overlay does
+    w, h = region.width, region.height
+    if vertical:
+        h = h or Dim(100.0, '%')
+        w = w or Dim(12.0, '%')
+    else:
+        w = w or Dim(100.0, '%')
+        h = h or Dim(12.0, '%')
+    ov = dc_replace(region, width=w, height=h)
+    rect = r._region_rect(ov)
+    rw = rect['w'] or 0.0
+    rh = rect['h'] or 0.0
+    x, y = r._anchor_pos(rect, rw, rh)
+
+    da = (spec.display_align or ('before' if vertical else 'after'))
+    if vertical:
+        tbrl = wm != 'tblr'
+        if da == 'center':
+            ax = x + rw / 2.0
+        elif (da == 'before') == tbrl:
+            ax = x + rw                  # columns anchor at the right
+        else:
+            ax = x
+        mid = canvas.width / 2.0
+        if da == 'center' and abs(ax - mid) < 2.0:
+            return 'center'
+        return 'vertical right' if ax >= mid else 'vertical left'
+
+    if da == 'before':
+        ay = y
+    elif da == 'center':
+        ay = y + rh / 2.0
+    else:
+        ay = y + rh
+    mid = canvas.height / 2.0
+    if da == 'center' and abs(ay - mid) < 2.0:
+        return 'center'
+    return 'bottom' if ay > mid else 'top'
+
+
 # --------------------------------------------------------------------------- #
 # Rendered cue
 # --------------------------------------------------------------------------- #

@@ -1010,10 +1010,24 @@ class PreviewPane(QWidget):
         self._sync_play_button()
 
     def _kickstart_qt(self, ms: float):
-        """QMediaPlayer stays BLACK until playback has started once —
-        play for a moment, then pause back on the target frame."""
+        """QMediaPlayer stays BLACK until playback has started once.
+        play() issued before the (async) media load completes is
+        silently dropped — so remember the request and fire it from
+        mediaStatusChanged once the media is actually loaded."""
         if self._backend != 'qt' or self._player is None:
             return
+        self._pending_kick_ms = ms
+        st = self._player.mediaStatus()
+        if st in (QMediaPlayer.MediaStatus.LoadedMedia,
+                  QMediaPlayer.MediaStatus.BufferedMedia,
+                  QMediaPlayer.MediaStatus.BufferingMedia):
+            self._do_kickstart()
+
+    def _do_kickstart(self):
+        ms = getattr(self, '_pending_kick_ms', None)
+        if ms is None or self._player is None:
+            return
+        self._pending_kick_ms = None
         self._player.setPosition(int(ms))
         self._player.play()
 
@@ -1022,7 +1036,8 @@ class PreviewPane(QWidget):
                 self._player.pause()
                 self._player.setPosition(int(ms))
                 self._sync_play_button()
-        QTimer.singleShot(160, settle)
+                self._update_overlays(ms, force=True)
+        QTimer.singleShot(180, settle)
 
     def _frames_toggled(self, on: bool):
         if on and self.chk_player.isChecked():
@@ -1138,6 +1153,9 @@ class PreviewPane(QWidget):
     def _media_status(self, status):
         if not MULTIMEDIA_AVAILABLE:
             return
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia,
+                      QMediaPlayer.MediaStatus.BufferedMedia):
+            self._do_kickstart()         # deferred first-frame reveal
         if status == QMediaPlayer.MediaStatus.InvalidMedia:
             self._player_failed = True
             self.lbl_info.setText(

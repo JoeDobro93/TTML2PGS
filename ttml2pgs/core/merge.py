@@ -212,6 +212,40 @@ def bake_timing(doc: SubtitleDocument, plan, offset_ms: float) -> None:
 # Timestamp snapping
 # --------------------------------------------------------------------------- #
 
+def _nearest_bound(t: float, bounds, threshold_ms: float
+                   ) -> Optional[float]:
+    """Nearest boundary within the threshold — when several qualify,
+    the CLOSEST one wins (bounds must be sorted)."""
+    best, bd = None, threshold_ms
+    for b in bounds:
+        d = abs(b - t)
+        if d <= bd:
+            best, bd = b, d
+        elif b - t > threshold_ms:
+            break
+    return best
+
+
+def _snap_cue(cue, bounds, threshold_ms: float) -> bool:
+    """Move each endpoint to the nearest boundary in range; skip moves
+    that would invert or zero the cue. True if anything changed."""
+    nb = _nearest_bound(cue.begin_ms, bounds, threshold_ms)
+    ne = _nearest_bound(cue.end_ms, bounds, threshold_ms)
+    new_b = nb if nb is not None else cue.begin_ms
+    new_e = ne if ne is not None else cue.end_ms
+    if new_e <= new_b:                   # would invert/zero — best effort
+        if nb is not None and cue.end_ms > new_b:
+            new_e = cue.end_ms           # keep original end
+        elif ne is not None and new_e > cue.begin_ms:
+            new_b = cue.begin_ms         # keep original start
+        else:
+            return False
+    if (new_b, new_e) != (cue.begin_ms, cue.end_ms):
+        cue.begin_ms, cue.end_ms = new_b, new_e
+        return True
+    return False
+
+
 def snap_secondary_timestamps(doc: SubtitleDocument,
                               primary_lang: str,
                               threshold_ms: float = 500.0) -> int:
@@ -222,8 +256,7 @@ def snap_secondary_timestamps(doc: SubtitleDocument,
     For every cue NOT in the primary language that overlaps (or nearly
     overlaps) primary cues: each endpoint moves to the nearest primary
     start/end within `threshold_ms`; endpoints with no boundary in
-    range stay put. Snaps that would invert or zero the cue are
-    skipped. Returns the number of cues changed.
+    range stay put. Returns the number of cues changed.
     """
     p_lang = (primary_lang or doc.language or '').split('-')[0]
 
@@ -235,38 +268,72 @@ def snap_secondary_timestamps(doc: SubtitleDocument,
         return 0
     bounds = sorted({t for c in prim for t in (c.begin_ms, c.end_ms)})
 
-    def nearest(t: float) -> Optional[float]:
-        best, bd = None, threshold_ms
-        # bounds is sorted; a linear scan is fine at subtitle scales
-        for b in bounds:
-            d = abs(b - t)
-            if d <= bd:
-                best, bd = b, d
-            elif b - t > threshold_ms:
-                break
-        return best
-
     changed = 0
     for cue in doc.cues:
         if is_primary(cue):
             continue
-        # near a primary cue at all? (overlap, or an edge within range)
         touches = any(cue.begin_ms < p.end_ms + threshold_ms and
                       p.begin_ms - threshold_ms < cue.end_ms
                       for p in prim)
-        if not touches:
-            continue
-        nb, ne = nearest(cue.begin_ms), nearest(cue.end_ms)
-        new_b = nb if nb is not None else cue.begin_ms
-        new_e = ne if ne is not None else cue.end_ms
-        if new_e <= new_b:               # would invert/zero — best effort:
-            if nb is not None and cue.end_ms > new_b:
-                new_e = cue.end_ms       # keep original end
-            elif ne is not None and new_e > cue.begin_ms:
-                new_b = cue.begin_ms     # keep original start
-            else:
-                continue
-        if (new_b, new_e) != (cue.begin_ms, cue.end_ms):
-            cue.begin_ms, cue.end_ms = new_b, new_e
+        if touches and _snap_cue(cue, bounds, threshold_ms):
             changed += 1
+    return changed
+
+
+def align_same_language_overlaps(doc: SubtitleDocument,
+                                 threshold_ms: float = 500.0) -> int:
+    """
+    Within each language, align overlapping cues by REGION POSITION
+    priority: bottom > vertical right > vertical left > top > center.
+    The lower-priority cue's edges snap to the higher-priority cue's
+    boundaries (e.g. a top note aligns to the bottom dialogue).
+    """
+    from .renderer import (REGION_POSITION_PRIORITY,
+                           classify_region_position)
+
+    prio_cache: Dict[str, int] = {}
+
+    def cue_prio(c) -> int:
+        rid = c.region_id or ''
+        if rid not in prio_cache:
+            pos = classify_region_position(doc, doc.get_region(c))
+            prio_cache[rid] = REGION_POSITION_PRIORITY.get(pos, 4)
+        return prio_cache[rid]
+
+    by_lang: Dict[str, list] = {}
+    for c in doc.cues:
+        key = (c.lang or doc.language or '').split('-')[0]
+        by_lang.setdefault(key, []).append(c)
+
+    changed = 0
+    for cues in by_lang.values():
+        for cue in cues:
+            p = cue_prio(cue)
+            refs = [o for o in cues
+                    if o is not cue and cue_prio(o) < p and
+                    cue.begin_ms < o.end_ms + threshold_ms and
+                    o.begin_ms - threshold_ms < cue.end_ms]
+            if not refs:
+                continue
+            bounds = sorted({t for o in refs
+                             for t in (o.begin_ms, o.end_ms)})
+            if _snap_cue(cue, bounds, threshold_ms):
+                changed += 1
+    return changed
+
+
+def align_overlaps(doc: SubtitleDocument, primary_lang: str,
+                   threshold_ms: float = 500.0) -> int:
+    """
+    The full alignment pass ("Align overlaps…"): secondary languages
+    snap to the primary's cue boundaries, then same-language overlaps
+    align by region-position priority. Returns cues changed.
+    """
+    changed = 0
+    bases = {(c.lang or doc.language or '').split('-')[0]
+             for c in doc.cues}
+    if len(bases) > 1:
+        changed += snap_secondary_timestamps(doc, primary_lang,
+                                             threshold_ms)
+    changed += align_same_language_overlaps(doc, threshold_ms)
     return changed

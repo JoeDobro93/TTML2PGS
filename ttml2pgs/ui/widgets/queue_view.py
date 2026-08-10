@@ -168,6 +168,10 @@ class QueuePane(QWidget):
             'Continue paused/started work. Jobs never started stay '
             'waiting for you to start them.')
         self.b_clear = QPushButton('Clear finished')
+        self.b_clear_all = QPushButton('Clear all…')
+        self.b_clear_all.setToolTip(
+            'Remove EVERYTHING from the queue (running jobs are '
+            'canceled). Asks first.')
         row1 = QHBoxLayout()
         row1.addWidget(self.b_start_all)
         row1.addWidget(self.b_start_sel)
@@ -179,6 +183,7 @@ class QueuePane(QWidget):
         row2.addWidget(self.b_pause)
         row2.addWidget(self.b_resume)
         row2.addWidget(self.b_clear)
+        row2.addWidget(self.b_clear_all)
         row2.addStretch()
         self.lbl_status = QLabel('')
         row2.addWidget(self.lbl_status)
@@ -208,6 +213,7 @@ class QueuePane(QWidget):
         self.b_pause.clicked.connect(self.queue.pause_all)
         self.b_resume.clicked.connect(self.queue.resume_all)
         self.b_clear.clicked.connect(self._clear_finished)
+        self.b_clear_all.clicked.connect(self._clear_all)
         self.tree.customContextMenuRequested.connect(self._menu)
         self.tree.itemChanged.connect(self._item_check_changed)
         self.tree.itemSelectionChanged.connect(self._constrain_selection)
@@ -348,6 +354,21 @@ class QueuePane(QWidget):
                 self.queue.remove_group(ident)
             else:                          # jobs and external sups
                 self.queue.remove_job(ident)
+        self.refresh()
+
+    def _clear_all(self):
+        from PyQt6.QtWidgets import QMessageBox
+        groups = self.queue.snapshot()
+        if not groups:
+            return
+        if QMessageBox.question(
+                self, 'Clear queue',
+                f'Remove all {len(groups)} video group(s) from the '
+                f'queue? Running jobs are canceled.') != \
+                QMessageBox.StandardButton.Yes:
+            return
+        for g in groups:
+            self.queue.remove_group(g.id)
         self.refresh()
 
     def _clear_finished(self):

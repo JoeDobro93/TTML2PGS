@@ -21,6 +21,11 @@ from .units import Dim
 @dataclass
 class StyleOverrides:
     """Per-language forced styling. Each group has an enable flag."""
+    #: master switch for a LANGUAGE set: when off, the language follows
+    #: the Default set entirely (auto-created tabs start off, so they
+    #: never hijack Default edits). Ignored for the Default set itself.
+    enabled: bool = True
+
     override_font_size: bool = False
     font_size: Dim = field(default_factory=lambda: Dim(4.5, 'vh'))
 
@@ -213,18 +218,21 @@ class OverrideSet:
 
     def for_language(self, lang: str) -> StyleOverrides:
         lang = (lang or '').strip()
-        if lang in self.by_lang:
-            return self.by_lang[lang]
-        base = lang.split('-')[0]
-        if base in self.by_lang:
-            return self.by_lang[base]
+        for key in (lang, lang.split('-')[0]):
+            so = self.by_lang.get(key)
+            if so is not None:
+                # a disabled language set follows Default entirely
+                return so if so.enabled else self.by_lang['']
         return self.by_lang['']
 
-    def ensure_language(self, lang: str) -> StyleOverrides:
+    def ensure_language(self, lang: str,
+                        enabled: bool = True) -> StyleOverrides:
         lang = (lang or '').strip()
         if lang and lang not in self.by_lang:
             import copy
-            self.by_lang[lang] = copy.deepcopy(self.by_lang[''])
+            so = copy.deepcopy(self.by_lang[''])
+            so.enabled = enabled
+            self.by_lang[lang] = so
         return self.by_lang.get(lang, self.by_lang[''])
 
     # -- (de)serialization --------------------------------------------- #

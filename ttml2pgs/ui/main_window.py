@@ -216,6 +216,8 @@ class MainWindow(QMainWindow):
             return
         self.cue_pane.set_document(sess.doc)
         self.settings_pane.set_document(sess.doc)
+        # a (disabled) override tab for every open language
+        self.settings_pane.ensure_language_tabs(self.state.languages_open())
         self._push_preview_context(sess)
         self.setWindowTitle(
             f'TTML2PGS 2 — {sess.display_name}')
@@ -234,6 +236,7 @@ class MainWindow(QMainWindow):
         sess = self.state.active
         if sess is not None and row == self.state.active_index:
             self._push_preview_context(sess)
+        self.settings_pane.ensure_language_tabs(self.state.languages_open())
         self.sources_pane.refresh()
 
     def _cue_selected_for_editor(self, cue):

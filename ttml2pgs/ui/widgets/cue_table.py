@@ -472,11 +472,13 @@ class CuePane(QWidget):
         self.cmb_lang.setToolTip('Filter cues by source language '
                                  '(merged subtitles)')
         self.cmb_lang.setVisible(False)
-        self.btn_snap = QPushButton('Snap timestamps…')
+        self.btn_snap = QPushButton('Align overlaps…')
         self.btn_snap.setToolTip(
-            'Align secondary-language cue edges to the primary '
-            'language\'s cue boundaries within a threshold (merged '
-            'subtitles).')
+            'Align overlapping cue edges within a threshold. Merged '
+            'subtitles: the secondary language snaps to the primary\'s '
+            'cue boundaries. Within one language, overlaps align by '
+            'region position (bottom > vertical right > vertical left '
+            '> top > center).')
         self.btn_snap.setVisible(False)
         for w in (self.txt_filter, self.cmb_lang, self.btn_snap,
                   self.btn_add,
@@ -563,7 +565,8 @@ class CuePane(QWidget):
         return langs
 
     def _sync_lang_tools(self):
-        """Language filter + snap only appear for merged documents."""
+        """Language filter appears for merged documents; Align overlaps
+        works for any document."""
         langs = self._doc_langs()
         multi = len(langs) > 1
         self.cmb_lang.blockSignals(True)
@@ -573,7 +576,7 @@ class CuePane(QWidget):
             self.cmb_lang.addItems(langs)
         self.cmb_lang.blockSignals(False)
         self.cmb_lang.setVisible(multi)
-        self.btn_snap.setVisible(multi)
+        self.btn_snap.setVisible(self.doc is not None)
         self.proxy.set_lang_value(None)
 
     def _lang_filter_changed(self, text: str):
@@ -582,23 +585,27 @@ class CuePane(QWidget):
 
     def _snap_timestamps(self):
         from PyQt6.QtWidgets import QInputDialog, QMessageBox
-        from ...core.merge import snap_secondary_timestamps
+        from ...core.merge import align_overlaps
         if self.doc is None:
             return
+        multi = len(self._doc_langs()) > 1
+        what = (f'secondary languages snap to the primary '
+                f'({self.doc.language}) cue boundaries, then '
+                if multi else '')
         val, ok = QInputDialog.getDouble(
-            self, 'Snap timestamps',
-            f'Align secondary-language cue edges to the primary '
-            f'({self.doc.language}) cue boundaries.\n'
-            f'Threshold (seconds):',
+            self, 'Align overlaps',
+            f'Align overlapping cue edges: {what}same-language '
+            f'overlaps align by region position\n'
+            f'(bottom > vertical right > vertical left > top > '
+            f'center).\nThreshold (seconds):',
             CuePane._last_snap_s, 0.05, 10.0, 2)
         if not ok:
             return
         CuePane._last_snap_s = val
-        n = snap_secondary_timestamps(self.doc, self.doc.language,
-                                      val * 1000.0)
+        n = align_overlaps(self.doc, self.doc.language, val * 1000.0)
         self.model.refresh_order()
         self.cues_changed.emit()
-        QMessageBox.information(self, 'Snap timestamps',
+        QMessageBox.information(self, 'Align overlaps',
                                 f'{n} cue(s) adjusted.')
 
     def refresh(self):
