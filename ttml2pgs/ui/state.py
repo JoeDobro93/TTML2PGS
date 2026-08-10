@@ -42,6 +42,8 @@ class DocumentSession:
     dirty: bool = False
     #: merge mode: source file names ("A.ja.vtt | B.en.forced.vtt")
     merged_from: List[str] = field(default_factory=list)
+    #: mux track metadata name ('' = none; merged pairs get 'ja-en')
+    track_name: str = ''
 
     # ------------------------------------------------------------------ #
     @property

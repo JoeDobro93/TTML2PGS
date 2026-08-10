@@ -361,7 +361,8 @@ class MainWindow(QMainWindow):
             'remux_after_render', True) else None
         job = self.queue.add_render(
             doc_snapshot, sess.sub_path, settings, ov_snapshot,
-            video_path=sess.video_path, lang=sess.doc.language)
+            video_path=sess.video_path, lang=sess.doc.language,
+            track_name=sess.track_name)
         group = None
         for g in self.queue.snapshot():
             if job in g.render_jobs:

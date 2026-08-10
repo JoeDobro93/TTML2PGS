@@ -870,6 +870,8 @@ class TestPipelineAndQueue(unittest.TestCase):
             job.started = True
             q._save_state()
 
+            # an edited mux track name persists with the queue
+            q.set_track_name(job2.id, 'ja-en')
             q2 = QueueManager(state_path=state)
             n = q2.load_state()
             # the finished no-video group clears itself on reload; the
@@ -879,6 +881,8 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(q2.groups[0].render_jobs[0].state,
                              JobState.PENDING)
             self.assertFalse(q2.groups[0].render_jobs[0].started)
+            self.assertEqual(q2.groups[0].render_jobs[0].track_name,
+                             'ja-en')
 
     def test_failed_mux_runs_once_and_others_proceed(self):
         """Batch regression: a failing mux must go FAILED after ONE
@@ -2336,6 +2340,10 @@ class TestMergeMode(unittest.TestCase):
             out = merged_out_path(f['ja1'], None, 'ja', 'en+forced')
             self.assertEqual(os.path.basename(out),
                              'Episode01.ja+en.forced.sup')
+            from ttml2pgs.core.merge import merged_track_name
+            self.assertEqual(merged_track_name('ja', 'en+forced'),
+                             'ja-en.forced')
+            self.assertEqual(merged_track_name('ja', 'en'), 'ja-en')
             # every merged cue renders
             canvas = compute_canvas((1920, 1080), OverrideSet().layout)
             r = CueRenderer(m, canvas, OverrideSet())

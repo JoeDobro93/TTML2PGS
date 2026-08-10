@@ -367,6 +367,20 @@ class QueuePane(QWidget):
             self.app_settings['move_to_subs_folder'] = bool(on)
         self.settings_changed.emit()
 
+    def _edit_track_name(self, job_id: int):
+        """Edit the mux track metadata name (e.g. 'ja-en' for merges)."""
+        from PyQt6.QtWidgets import QInputDialog
+        job = self.queue.find_job(job_id)
+        if job is None:
+            return
+        name, ok = QInputDialog.getText(
+            self, 'Mux track name',
+            'Track name written into the MKV for this subtitle\n'
+            '(empty = no name):', text=job.track_name)
+        if ok:
+            self.queue.set_track_name(job_id, name)
+            self.refresh()
+
     @staticmethod
     def _open_folder(path: Optional[str]):
         if path:
@@ -484,9 +498,12 @@ class QueuePane(QWidget):
 
     def _update_job_item(self, it: QTreeWidgetItem, j: RenderJob):
         label = _job_state_label(j)
+        info = j.error or j.message
+        if j.track_name:
+            info = f'{info}  [track: {j.track_name}]'.strip()
         for col, txt in ((0, j.label()), (1, label),
                          (2, f"{j.progress * 100:.0f}%"),
-                         (3, j.error or j.message)):
+                         (3, info)):
             if it.text(col) != txt:
                 it.setText(col, txt)
         color = _ADDED_COLOR if label == 'added' \
@@ -590,6 +607,7 @@ class QueuePane(QWidget):
         a_cancel = menu.addAction('Cancel job')
         a_retry = menu.addAction('Retry job')
         menu.addSeparator()
+        a_track = menu.addAction('Set mux track name…')
         a_open = menu.addAction('Open output folder')
         a_open.setEnabled(bool(job and job.settings.out_path))
         menu.addSeparator()
@@ -600,6 +618,7 @@ class QueuePane(QWidget):
         a_pause.triggered.connect(lambda: self.queue.pause_job(ident))
         a_cancel.triggered.connect(lambda: self.queue.cancel_job(ident))
         a_retry.triggered.connect(lambda: self.queue.retry_job(ident))
+        a_track.triggered.connect(lambda: self._edit_track_name(ident))
         a_open.triggered.connect(
             lambda: self._open_folder(job.settings.out_path if job else None))
         a_up.triggered.connect(lambda: self.queue.move_job(ident, -1))

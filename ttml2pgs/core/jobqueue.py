@@ -335,6 +335,14 @@ class QueueManager:
                 j.checked = bool(on)
         self._notify()
 
+    def set_track_name(self, job_id: int, name: str):
+        """Mux track metadata name for one job (persisted)."""
+        with self._lock:
+            j = self._find_job(job_id)
+            if j is not None:
+                j.track_name = (name or '').strip()
+        self._notify()
+
     def set_group_checked(self, group_id: int, on: bool):
         with self._lock:
             for g in self.groups:

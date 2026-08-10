@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog,
                              QWidget)
 
 from ...core.merge import (all_variants, common_variants, merge_documents,
-                           merged_out_path, plan_merge, variant_label)
+                           merged_out_path, merged_track_name, plan_merge,
+                           variant_label)
 from ...core.parsers import SUBTITLE_EXTENSIONS
 from ...core.timing import fps_label
 from ..state import AppState, DocumentSession
@@ -185,10 +186,12 @@ class SourcesPane(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(22)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(COL_NAME, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(COL_VIDEO, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(COL_OUT, QHeaderView.ResizeMode.Stretch)
-        for c, w in ((COL_LANG, 46), (COL_RES, 78), (COL_HDR, 40),
+        # every column individually resizable; Output soaks up the rest
+        for c in range(len(self.HEADERS)):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        hh.setStretchLastSection(True)
+        for c, w in ((COL_NAME, 240), (COL_LANG, 46), (COL_VIDEO, 180),
+                     (COL_RES, 78), (COL_HDR, 40),
                      (COL_SRC_FPS, 64), (COL_TGT_FPS, 64),
                      (COL_CONFORM, 120), (COL_OFFSET, 70)):
             self.table.setColumnWidth(c, w)
@@ -431,6 +434,7 @@ class SourcesPane(QWidget):
                                   os.path.basename(s_path)]
             p_sess.out_path = merged_out_path(
                 p_path, p_sess.video_path, prim, sec)
+            p_sess.track_name = merged_track_name(prim, sec)
             p_sess.dirty = True
             to_close.append(s_path)
             if close_unused:
