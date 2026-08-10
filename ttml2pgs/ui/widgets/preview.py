@@ -123,6 +123,14 @@ def compute_region_boxes(doc: SubtitleDocument,
     seen: Dict[tuple, int] = {}
     BAND = 12.0
 
+    # per-language safe-area padding applies by the language of the
+    # CUES using each region (merged docs mix languages) — outlines
+    # must move exactly like the text does
+    region_lang: Dict[str, str] = {}
+    for cue in doc.cues:
+        if cue.region_id and cue.region_id not in region_lang:
+            region_lang[cue.region_id] = cue.lang or doc.language
+
     for rid in sorted(doc.regions.keys()):
         region = doc.regions[rid]
         spec = doc.specified_style(region.style_refs, region.style)
@@ -142,7 +150,8 @@ def compute_region_boxes(doc: SubtitleDocument,
         ov = dc_replace(region, width=w, height=h)
 
         rect = renderer._region_rect(
-            ov, renderer.overrides.for_language(doc.language))
+            ov, renderer.overrides.for_language(
+                region_lang.get(rid, doc.language)))
         rw = rect['w'] if rect['w'] is not None else 0.0
         rh = rect['h'] if rect['h'] is not None else 0.0
         x, y = renderer._anchor_pos(rect, rw, rh)

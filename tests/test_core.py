@@ -2527,6 +2527,69 @@ class TestMergeMode(unittest.TestCase):
             ja = [c for c in m.cues if c.lang == 'ja']
             self.assertEqual(min(c.begin_ms for c in ja), 2000.0)
 
+    def test_cross_format_merge_and_t2p_roundtrip(self):
+        """Merge is format-agnostic (everything parses into the same
+        model): TTML + VTT merge, and the result survives a .t2p
+        save/load with per-cue languages intact."""
+        from ttml2pgs.core.merge import merge_documents
+        with tempfile.TemporaryDirectory() as td:
+            p = load_subtitle(sample('netflix_ja.ttml'))   # TTML
+            f = self._fixture(td)
+            s = load_subtitle(f['enf1'])                   # VTT
+            m = merge_documents(p, s, 'ja', 'en+forced')
+            self.assertEqual(m.language, 'ja')
+            self.assertEqual(sorted({c.lang for c in m.cues}),
+                             ['en', 'ja'])
+            # TTML styles/regions + suffixed VTT regions coexist
+            self.assertTrue(any(r.endswith('.en') for r in m.regions))
+            self.assertIn('region0', m.regions)
+            canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+            r = CueRenderer(m, canvas, OverrideSet())
+            for cue in m.cues:
+                self.assertIsNotNone(r.render_cue(cue))
+            # .t2p round trip keeps the merge fully editable
+            proj = os.path.join(td, 'merged.t2p')
+            save_project(proj, m)
+            m2 = load_subtitle(proj)
+            self.assertEqual(sorted({c.lang for c in m2.cues}),
+                             ['en', 'ja'])
+            self.assertEqual(len(m2.cues), len(m.cues))
+            self.assertTrue(any(r.endswith('.en') for r in m2.regions))
+
+    def test_region_outlines_follow_per_language_padding(self):
+        """Show-regions outlines must move with each REGION's language
+        padding (by the cues using it), matching where text renders —
+        merged docs mix languages."""
+        try:
+            from ttml2pgs.ui.widgets.preview import compute_region_boxes
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        from ttml2pgs.core.merge import merge_documents
+        with tempfile.TemporaryDirectory() as td:
+            f = self._fixture(td)
+            m = merge_documents(load_subtitle(f['ja1']),
+                                load_subtitle(f['enf1']),
+                                'ja', 'en+forced')
+            canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+
+            def boxes(ov):
+                r = CueRenderer(m, canvas, ov)
+                return {rid: (x, y, w, h) for rid, _c, x, y, w, h, _corner
+                        in compute_region_boxes(m, r)}
+
+            plain = boxes(OverrideSet())
+            ov = OverrideSet()
+            en = ov.ensure_language('en')
+            en.use_padding = True
+            en.padding_v = en.padding_h = 10.0
+            padded = boxes(ov)
+            ja_rid = next(r for r in m.regions if not r.endswith('.en'))
+            en_rid = next(r for r in m.regions if r.endswith('.en'))
+            self.assertEqual(plain[ja_rid], padded[ja_rid],
+                             'ja region must ignore the en padding')
+            self.assertNotEqual(plain[en_rid], padded[en_rid],
+                                'en region outline must move inward')
+
     def test_merge_dialog_offscreen(self):
         try:
             import PyQt6  # noqa: F401
