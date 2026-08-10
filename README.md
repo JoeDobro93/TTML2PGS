@@ -162,6 +162,13 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   the embedded player releases the video file, and if something else
   still holds it locked, the mux lands as `*.muxed.mkv` next to the
   original rather than failing the batch.
+* **MakeMKV-style checkboxes**: every video and every subtitle row has
+  one. "Render all" (and group start) arm only checked jobs whose
+  video is checked too — uncheck a row and it sits out of batch
+  starts. Right-click a video → Select/Unselect all subtitles.
+* Selection is kind-constrained: shift-selecting video rows never
+  grabs their subtitles, and shift-selecting subtitles stays inside
+  one video's group — no more erratic mixed selections.
 * The tree updates **in place** — multi-selection, the shift-click
   anchor and scroll position survive live progress updates. **Del**
   removes the selection; the right-click menu adapts to it (bulk
@@ -171,6 +178,9 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   their children — `2/3 · rendering`, live render %, then `mux 45%` —
   so collapsed groups stay readable. Per-group **mux** and **replace
   original** toggles live in the group's context menu.
+* Closing the app clears fully-finished groups from the queue;
+  everything else comes back in its last state (done stays done,
+  failed stays failed with its error) — finished work never re-runs.
 * Pause / resume / cancel / retry / reorder at queue, group and job
   level; pausing checkpoints between cues and resumes without redoing
   finished cues.

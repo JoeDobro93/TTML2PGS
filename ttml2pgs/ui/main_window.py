@@ -193,11 +193,16 @@ class MainWindow(QMainWindow):
             dlg = PreferencesDialog(self.state.overrides,
                                     self.state.settings, parent=self)
             dlg.profiles_changed.connect(self._overrides_edited)
-            dlg.settings_changed.connect(self.state.save_settings)
+            dlg.settings_changed.connect(self._pref_settings_changed)
             self._pref_dialog = dlg
         self._pref_dialog.show()
         self._pref_dialog.raise_()
         self._pref_dialog.activateWindow()
+
+    def _pref_settings_changed(self):
+        self.state.save_settings()
+        self.queue.move_to_subs = self.state.settings.get(
+            'move_to_subs_folder', False)
 
     # ------------------------------------------------------------------ #
     # Session handling
@@ -271,9 +276,10 @@ class MainWindow(QMainWindow):
 
     def _queue_settings_edited(self):
         """Queue-pane option toggles (e.g. move-to-subs): persist and
-        mirror the checkbox in the settings pane."""
+        mirror the checkbox in the Preferences dialog if it's open."""
         self.state.save_settings()
-        chk = getattr(self.settings_pane, 'chk_move', None)
+        dlg = getattr(self, '_pref_dialog', None)
+        chk = getattr(dlg, 'chk_move', None) if dlg else None
         if chk is not None:
             chk.blockSignals(True)
             chk.setChecked(self.state.settings.get(

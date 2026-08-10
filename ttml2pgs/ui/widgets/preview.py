@@ -141,7 +141,8 @@ def compute_region_boxes(doc: SubtitleDocument,
                 h = Dim(BAND, '%')
         ov = dc_replace(region, width=w, height=h)
 
-        rect = renderer._region_rect(ov)
+        rect = renderer._region_rect(
+            ov, renderer.overrides.for_language(doc.language))
         rw = rect['w'] if rect['w'] is not None else 0.0
         rh = rect['h'] if rect['h'] is not None else 0.0
         x, y = renderer._anchor_pos(rect, rw, rh)
@@ -230,9 +231,16 @@ class _RenderWorker(QObject):
     def _do_scene(self, ctx: _RenderContext, cue: Cue,
                   want_frame: bool, tone_map: bool):
         canvas, renderer = self._make_renderer(ctx)
+        # padding guides follow the ACTIVE language: a ja file previews
+        # the ja padding when a ja set exists, else the Default set
+        so = ctx.overrides.for_language(ctx.doc.language)
+        pad_x, pad_y = canvas.pad_x, canvas.pad_y
+        if so.use_padding:
+            pad_x += canvas.content_w * (so.padding_h / 100.0) / 2.0
+            pad_y += canvas.content_h * (so.padding_v / 100.0) / 2.0
         scene = PreviewScene(canvas_w=canvas.width, canvas_h=canvas.height,
                              content=canvas.content, renders=[],
-                             pad=(canvas.pad_x, canvas.pad_y))
+                             pad=(pad_x, pad_y))
         t = cue.begin_ms + 1.0
         active = [c for c in ctx.doc.cues
                   if c.begin_ms <= t < c.end_ms and c.enabled]
@@ -790,7 +798,7 @@ class PreviewPane(QWidget):
         self.spin_ar_h.valueChanged.connect(self._matte_changed)
         self.chk_matte.toggled.connect(self._matte_changed)
         self.btn_bg.clicked.connect(self._pick_bg)
-        self.chk_frames.toggled.connect(lambda *_: self.schedule_render())
+        self.chk_frames.toggled.connect(self._frames_toggled)
         self.chk_tonemap.toggled.connect(lambda *_: self.schedule_render())
         self.chk_regions.toggled.connect(lambda *_: self.schedule_render())
         self.btn_popout.clicked.connect(self._toggle_popout)
@@ -950,10 +958,19 @@ class PreviewPane(QWidget):
                                   'matched video.')
             self.chk_player.setChecked(False)
             return
+        if on and self.chk_frames.isChecked():
+            # player and frame extraction are mutually exclusive views
+            self.chk_frames.blockSignals(True)
+            self.chk_frames.setChecked(False)
+            self.chk_frames.blockSignals(False)
         if on:
             if self._want_mpv() and self._ensure_mpv():
                 self._backend = 'mpv'
                 self._stack.setCurrentWidget(self._mpv)
+                # reload if the file was released (mux) or has changed
+                if self.video_path and \
+                        self._mpv.loaded_path != self.video_path:
+                    self._mpv.load(self.video_path)
             elif MULTIMEDIA_AVAILABLE:
                 self._backend = 'qt'
                 self._ensure_player()
@@ -966,10 +983,13 @@ class PreviewPane(QWidget):
                 return
             self.btn_play.setEnabled(True)
             self.slider.setEnabled(True)
-            if self.cue is not None:
-                self._pl_seek(self.cue.begin_ms + 10)
-                self._pl_pause(True)
-            self._update_overlays(self._pl_position(), force=True)
+            # jump straight to the selected cue's frame, subtitle shown
+            at = (self.cue.begin_ms + 10) if self.cue is not None else 0.0
+            self._pl_seek(at)
+            self._pl_pause(True)
+            self._kickstart_qt(at)
+            self._update_overlays(at, force=True)
+            self.schedule_render()       # pushes overlays once rendered
         else:
             self._pl_pause(True)
             self._play_timer.stop()
@@ -979,6 +999,27 @@ class PreviewPane(QWidget):
             self._backend = ''
             self.schedule_render()
         self._sync_play_button()
+
+    def _kickstart_qt(self, ms: float):
+        """QMediaPlayer stays BLACK until playback has started once —
+        play for a moment, then pause back on the target frame."""
+        if self._backend != 'qt' or self._player is None:
+            return
+        self._player.setPosition(int(ms))
+        self._player.play()
+
+        def settle():
+            if self._player is not None and self.chk_player.isChecked():
+                self._player.pause()
+                self._player.setPosition(int(ms))
+                self._sync_play_button()
+        QTimer.singleShot(160, settle)
+
+    def _frames_toggled(self, on: bool):
+        if on and self.chk_player.isChecked():
+            # mutually exclusive with the embedded player
+            self.chk_player.setChecked(False)   # → back to stills mode
+        self.schedule_render()
 
     # -- backend-agnostic transport helpers ----------------------------- #
     def _pl_seek(self, ms: float):

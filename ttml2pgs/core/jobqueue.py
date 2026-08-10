@@ -67,6 +67,9 @@ class RenderJob:
     #: Resume also only affects started jobs, so what you queued but never
     #: launched stays put.
     started: bool = False
+    #: MakeMKV-style arming checkbox: "Render all" (and group start)
+    #: only touch checked jobs whose group is checked too.
+    checked: bool = True
     progress: float = 0.0
     message: str = ''
     error: str = ''
@@ -91,6 +94,9 @@ class VideoGroup:
     render_jobs: List[RenderJob] = field(default_factory=list)
     external_sups: List[ExternalSup] = field(default_factory=list)
     mux_enabled: bool = True
+    #: group-level arming checkbox — unchecked = the whole video sits
+    #: out of "Render all" no matter what its jobs' checkboxes say
+    checked: bool = True
     mux_state: JobState = JobState.WAITING
     mux_progress: float = 0.0
     mux_message: str = ''
@@ -273,11 +279,12 @@ class QueueManager:
         self._notify()
 
     def start_group(self, group_id: int):
+        """Arm the group's CHECKED jobs (unchecked ones sit out)."""
         with self._lock:
             for g in self.groups:
                 if g.id == group_id:
                     for j in g.render_jobs:
-                        if not j.state.is_terminal():
+                        if j.checked and not j.state.is_terminal():
                             j.started = True
                             if j.state == JobState.PAUSED:
                                 j.state = JobState.PENDING
@@ -287,17 +294,44 @@ class QueueManager:
         self._notify()
 
     def start_all(self):
+        """Arm every job that is checked AND whose group is checked."""
         with self._lock:
             self._queue_paused = False
             for g in self.groups:
+                if not g.checked:
+                    continue
                 for j in g.render_jobs:
-                    if not j.state.is_terminal():
+                    if j.checked and not j.state.is_terminal():
                         j.started = True
                         if j.state == JobState.PAUSED:
                             j.state = JobState.PENDING
                             if j.pipeline:
                                 j.pipeline.pause_event.clear()
         self._wake.set()
+        self._notify()
+
+    # -- arming checkboxes ---------------------------------------------- #
+    def set_job_checked(self, job_id: int, on: bool):
+        with self._lock:
+            j = self._find_job(job_id)
+            if j is not None:
+                j.checked = bool(on)
+        self._notify()
+
+    def set_group_checked(self, group_id: int, on: bool):
+        with self._lock:
+            for g in self.groups:
+                if g.id == group_id:
+                    g.checked = bool(on)
+        self._notify()
+
+    def check_all_jobs(self, group_id: int, on: bool):
+        """Right-click 'Select/Unselect all subtitles' on a group."""
+        with self._lock:
+            for g in self.groups:
+                if g.id == group_id:
+                    for j in g.render_jobs:
+                        j.checked = bool(on)
         self._notify()
 
     def pause_all(self):
@@ -657,7 +691,9 @@ class QueueManager:
                         'video_path': g.video_path,
                         'mux_enabled': g.mux_enabled,
                         'mux_state': g.mux_state.value,
+                        'mux_error': g.mux_error,
                         'replace_original': g.replace_original,
+                        'checked': g.checked,
                         'renders': [{
                             'sub_path': j.sub_path,
                             'settings': j.settings.to_dict(),
@@ -666,6 +702,8 @@ class QueueManager:
                             'track_name': j.track_name,
                             'state': j.state.value,
                             'started': j.started,
+                            'checked': j.checked,
+                            'error': j.error,
                         } for j in g.render_jobs],
                         'external': [{
                             'sup_path': e.sup_path, 'lang': e.lang,
@@ -681,7 +719,16 @@ class QueueManager:
             pass
 
     def load_state(self) -> int:
-        """Restore a previously saved queue. Returns #jobs restored."""
+        """
+        Restore a previously saved queue. Returns #jobs restored.
+
+        Fully-completed groups (all renders done + mux done/disabled)
+        are dropped — finished work must not reappear, and it must
+        never be re-run (re-running after a mux moved/replaced files is
+        what used to resurface as phantom "failed" jobs). Everything
+        else comes back in its LAST state: done stays done, failed
+        stays failed (with its error), unfinished work re-queues.
+        """
         if not self.state_path or not os.path.exists(self.state_path):
             return 0
         try:
@@ -692,11 +739,19 @@ class QueueManager:
         count = 0
         with self._lock:
             for gd in data.get('groups', []):
+                renders = gd.get('renders', [])
+                prev_mux = gd.get('mux_state', 'waiting')
+                mux_over = (not bool(gd.get('mux_enabled', True))
+                            or not gd.get('video_path')
+                            or prev_mux == 'done')
+                if renders and mux_over and \
+                        all(jd.get('state') == 'done' for jd in renders):
+                    continue                     # finished — clear it out
                 g = VideoGroup(video_path=gd.get('video_path'))
                 g.mux_enabled = bool(gd.get('mux_enabled', True))
                 g.replace_original = bool(gd.get('replace_original', True))
-                prev_mux = gd.get('mux_state', 'waiting')
-                for jd in gd.get('renders', []):
+                g.checked = bool(gd.get('checked', True))
+                for jd in renders:
                     settings = RenderSettings.from_dict(jd.get('settings', {}))
                     job = RenderJob(
                         doc=None, sub_path=jd.get('sub_path', ''),
@@ -707,12 +762,20 @@ class QueueManager:
                         track_name=jd.get('track_name', ''))
                     prev = jd.get('state')
                     job.started = bool(jd.get('started', prev != 'pending'))
-                    # crash recovery: done + file exists → keep done;
-                    # otherwise re-queue.
+                    job.checked = bool(jd.get('checked', True))
                     if prev == 'done' and os.path.exists(settings.out_path):
                         job.state = JobState.DONE
                         job.progress = 1.0
+                    elif prev == 'failed':
+                        job.state = JobState.FAILED
+                        job.error = jd.get('error', '') or \
+                            'failed in a previous session'
+                    elif prev == 'canceled':
+                        job.state = JobState.CANCELED
                     else:
+                        # running/paused/pending (or done with its file
+                        # gone) → back to the queue, unstarted work stays
+                        # unstarted
                         job.state = JobState.PENDING
                     g.render_jobs.append(job)
                     count += 1
@@ -724,6 +787,10 @@ class QueueManager:
                     count += 1
                 if prev_mux == 'done':
                     g.mux_state = JobState.DONE
+                elif prev_mux == 'failed':
+                    g.mux_state = JobState.FAILED
+                    g.mux_error = gd.get('mux_error', '') or \
+                        'failed in a previous session'
                 if g.render_jobs or g.external_sups:
                     self.groups.append(g)
         self._notify()

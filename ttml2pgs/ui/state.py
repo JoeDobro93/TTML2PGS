@@ -186,13 +186,23 @@ class AppState:
                 for so in self.overrides.by_lang.values():
                     if so.weight_boost in (1.0, 3.0):
                         so.weight_boost = 1.0
+            if version < 4:
+                # safe-area padding moved from layout (target-level) to
+                # the per-language sets — carry it into Default
+                lo = self.overrides.layout
+                if getattr(lo, 'use_padding', False):
+                    base = self.overrides.by_lang['']
+                    base.use_padding = True
+                    base.padding_v = float(getattr(lo, 'padding_v', 0.0))
+                    base.padding_h = float(getattr(lo, 'padding_h', 0.0))
+                    lo.use_padding = False
         except (OSError, ValueError):
             pass
 
     def save_settings(self):
         try:
             with open(self._settings_path, 'w', encoding='utf-8') as f:
-                json.dump({'version': 3,
+                json.dump({'version': 4,
                            'settings': self.settings,
                            'overrides': self.overrides.to_dict()},
                           f, indent=1)

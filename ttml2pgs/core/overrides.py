@@ -61,6 +61,14 @@ class StyleOverrides:
     override_line_height: bool = False
     line_height: Dim = field(default_factory=lambda: Dim(1.25, ''))
 
+    #: safe-area padding (per language — Japanese vertical text may want
+    #: different insets than Latin dialogue). Total percent per axis,
+    #: split between the two edges. Moves region anchoring inward only;
+    #: never scales text.
+    use_padding: bool = False
+    padding_v: float = 0.0
+    padding_h: float = 0.0
+
     #: Auto-color: pick text color/alpha from the *target video's* dynamic
     #: range, so batches mixing HDR and SDR episodes each get suitable
     #: levels (pure white is blinding in HDR; HDR grey is dim in SDR).

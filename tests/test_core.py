@@ -474,19 +474,20 @@ class TestRendering(unittest.TestCase):
 
     def test_padding_moves_regions_without_scaling_text(self):
         """Safe-area padding = v1 #pad-box: regions move inward, fonts
-        keep their size (only AR letterboxing may scale text)."""
+        keep their size. Now PER LANGUAGE: the ja set's padding applies
+        to ja cues; a different language's padding must not."""
         cue = next(c for c in self.doc.sorted_cues()
                    if not self.doc.get_region(c).is_vertical())
         plain = self.renderer.render_cue(cue)
 
         ov = OverrideSet()
-        ov.layout.use_padding = True
-        ov.layout.padding_v = 10.0          # 5% inset per edge
-        ov.layout.padding_h = 10.0
-        padded_canvas = compute_canvas((1920, 1080), ov.layout)
-        self.assertEqual(padded_canvas.content_h, 1080.0)   # unshrunk
-        self.assertEqual(padded_canvas.pad_y, 54.0)
-        rp = CueRenderer(self.doc, padded_canvas, ov)
+        so = ov.ensure_language('ja')
+        so.use_padding = True
+        so.padding_v = 10.0                 # 5% inset per edge
+        so.padding_h = 10.0
+        canvas = compute_canvas((1920, 1080), ov.layout)
+        self.assertEqual(canvas.content_h, 1080.0)          # unshrunk
+        rp = CueRenderer(self.doc, canvas, ov)
         padded = rp.render_cue(cue)
 
         # same glyphs, same size: bitmap dims unchanged
@@ -498,6 +499,14 @@ class TestRendering(unittest.TestCase):
                             plain.y + plain.height)
         else:                                 # top-half cue
             self.assertGreater(padded.y, plain.y)
+
+        # padding on a DIFFERENT language must not move this ja cue
+        ov2 = OverrideSet()
+        en = ov2.ensure_language('en')
+        en.use_padding = True
+        en.padding_v = en.padding_h = 10.0
+        other = CueRenderer(self.doc, canvas, ov2).render_cue(cue)
+        self.assertEqual((plain.x, plain.y), (other.x, other.y))
 
     def test_region_overlay_boxes(self):
         try:
@@ -862,11 +871,13 @@ class TestPipelineAndQueue(unittest.TestCase):
 
             q2 = QueueManager(state_path=state)
             n = q2.load_state()
-            self.assertEqual(n, 2)
-            self.assertEqual(q2.groups[0].render_jobs[0].state, JobState.DONE)
-            # started/unstarted survives the round-trip
-            self.assertTrue(q2.groups[0].render_jobs[0].started)
-            self.assertFalse(q2.groups[1].render_jobs[0].started)
+            # the finished no-video group clears itself on reload; the
+            # unstarted one comes back still unstarted
+            self.assertEqual(n, 1)
+            self.assertEqual(len(q2.groups), 1)
+            self.assertEqual(q2.groups[0].render_jobs[0].state,
+                             JobState.PENDING)
+            self.assertFalse(q2.groups[0].render_jobs[0].started)
 
     def test_failed_mux_runs_once_and_others_proceed(self):
         """Batch regression: a failing mux must go FAILED after ONE
@@ -1055,6 +1066,181 @@ class TestPipelineAndQueue(unittest.TestCase):
             pane.refresh()
             self.assertEqual(pane.tree.topLevelItemCount(), 0)
             self.assertEqual(len(q.snapshot()), 0)
+
+    def test_queue_pane_checkboxes_and_selection_rules(self):
+        """Checkbox column reflects/drives engine arming; selection is
+        kind-constrained (parents with parents, children within one
+        group)."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.queue_view import QueuePane
+        from ttml2pgs.core.jobqueue import QueueManager
+
+        with tempfile.TemporaryDirectory() as td:
+            v1, v2 = (os.path.join(td, n) for n in ('e1.mkv', 'e2.mkv'))
+            q = QueueManager()
+            doc = load_subtitle(sample('basic.srt'))
+
+            def add(video, name):
+                return q.add_render(
+                    doc, name, RenderSettings(
+                        out_path=os.path.join(td, name + '.sup')),
+                    OverrideSet(), video_path=video, lang='en')
+            j1, j2 = add(v1, 'a'), add(v1, 'b')
+            j3 = add(v2, 'c')
+            pane = QueuePane(q, app_settings={})
+            pane.refresh()
+            g1i, g2i = (pane.tree.topLevelItem(i) for i in (0, 1))
+
+            # rows start checked; unchecking a row updates the engine
+            self.assertEqual(g1i.checkState(0), Qt.CheckState.Checked)
+            g1i.child(1).setCheckState(0, Qt.CheckState.Unchecked)
+            self.assertFalse(j2.checked)
+            g2i.setCheckState(0, Qt.CheckState.Unchecked)
+            self.assertFalse(q.snapshot()[1].checked)
+
+            # child selection is constrained to ONE group (the prune is
+            # deferred a tick — see _constrain_selection)
+            pane.tree.clearSelection()
+            pane.tree.setCurrentItem(g1i.child(0))
+            g1i.child(0).setSelected(True)
+            g2i.child(0).setSelected(True)      # other video's child
+            app.processEvents()
+            self.assertNotIn(g2i.child(0), pane.tree.selectedItems(),
+                             'cross-group child selection must prune')
+            self.assertIn(g1i.child(0), pane.tree.selectedItems())
+            # parent selection never mixes with children
+            pane.tree.clearSelection()
+            pane.tree.setCurrentItem(g1i)
+            g1i.setSelected(True)
+            g1i.child(0).setSelected(True)
+            app.processEvents()
+            self.assertNotIn(g1i.child(0), pane.tree.selectedItems(),
+                             'parent+child selection must prune')
+            q.shutdown()
+
+    def test_queue_reload_drops_completed_keeps_statuses(self):
+        """Reopening the app: fully-finished groups disappear; the rest
+        come back in their LAST state (failed stays failed with its
+        error — never a phantom re-run)."""
+        from ttml2pgs.core.jobqueue import QueueManager, JobState
+        with tempfile.TemporaryDirectory() as td:
+            state = os.path.join(td, 'q.json')
+            done_sup = os.path.join(td, 'ep1.done.sup')
+            open(done_sup, 'wb').write(b'x')
+            v1 = os.path.join(td, 'ep1.mkv')
+            v2 = os.path.join(td, 'ep2.mkv')
+
+            q = QueueManager(state_path=state)
+            doc = load_subtitle(sample('basic.srt'))
+            # group 1: everything done + muxed → must vanish on reload
+            jd = q.add_render(doc, 'a.srt',
+                              RenderSettings(out_path=done_sup),
+                              OverrideSet(), video_path=v1, lang='en')
+            jd.state = JobState.DONE
+            g1 = q.snapshot()[0]
+            g1.mux_state = JobState.DONE
+            # group 2: one failed, one never started
+            jf = q.add_render(doc, 'b.srt',
+                              RenderSettings(
+                                  out_path=os.path.join(td, 'ep2.a.sup')),
+                              OverrideSet(), video_path=v2, lang='ja')
+            jf.state = JobState.FAILED
+            jf.error = 'font exploded'
+            jf.started = True
+            jp = q.add_render(doc, 'c.srt',
+                              RenderSettings(
+                                  out_path=os.path.join(td, 'ep2.b.sup')),
+                              OverrideSet(), video_path=v2, lang='en')
+            jp.checked = False
+            q._save_state()
+
+            q2 = QueueManager(state_path=state)
+            n = q2.load_state()
+            self.assertEqual(n, 2)
+            groups = q2.snapshot()
+            self.assertEqual(len(groups), 1, 'completed group must clear')
+            g = groups[0]
+            self.assertEqual(g.video_path, v2)
+            self.assertEqual(g.render_jobs[0].state, JobState.FAILED)
+            self.assertEqual(g.render_jobs[0].error, 'font exploded')
+            self.assertEqual(g.render_jobs[1].state, JobState.PENDING)
+            self.assertFalse(g.render_jobs[1].started)
+            self.assertFalse(g.render_jobs[1].checked)
+
+    def test_queue_checkbox_gating(self):
+        """MakeMKV model: Render all arms only checked jobs in checked
+        groups; group start skips unchecked jobs; check_all flips all."""
+        from ttml2pgs.core.jobqueue import QueueManager
+        with tempfile.TemporaryDirectory() as td:
+            v1 = os.path.join(td, 'ep1.mkv')
+            v2 = os.path.join(td, 'ep2.mkv')
+            q = QueueManager()
+            doc = load_subtitle(sample('basic.srt'))
+
+            def add(video, name):
+                return q.add_render(
+                    doc, name, RenderSettings(
+                        out_path=os.path.join(td, name + '.sup')),
+                    OverrideSet(), video_path=video, lang='en')
+            a1, a2 = add(v1, 'a1'), add(v1, 'a2')
+            b1 = add(v2, 'b1')
+            g1, g2 = q.snapshot()
+
+            q.set_job_checked(a2.id, False)     # a2 sits out
+            q.set_group_checked(g2.id, False)   # whole ep2 sits out
+            q.start_all()
+            self.assertTrue(a1.started)
+            self.assertFalse(a2.started, 'unchecked job must sit out')
+            self.assertFalse(b1.started, 'unchecked group must sit out')
+
+            # explicit group start honors job checkboxes only
+            q.set_group_checked(g2.id, True)
+            q.set_job_checked(b1.id, False)
+            q.start_group(g2.id)
+            self.assertFalse(b1.started)
+            q.check_all_jobs(g2.id, True)
+            self.assertTrue(b1.checked)
+            q.start_group(g2.id)
+            self.assertTrue(b1.started)
+            q.shutdown()
+
+    def test_settings_migration_v4_padding_per_language(self):
+        """v3 settings with layout padding migrate it into the Default
+        language set."""
+        with tempfile.TemporaryDirectory() as td:
+            old_cfg = os.environ.get('XDG_CONFIG_HOME')
+            os.environ['XDG_CONFIG_HOME'] = td
+            try:
+                from ttml2pgs.ui.state import AppState, config_dir
+                os.makedirs(config_dir(), exist_ok=True)
+                import json as _json
+                ov = OverrideSet()
+                ov.layout.use_padding = True
+                ov.layout.padding_v = 12.0
+                ov.layout.padding_h = 6.0
+                with open(os.path.join(config_dir(), 'settings.json'),
+                          'w', encoding='utf-8') as f:
+                    _json.dump({'version': 3, 'settings': {},
+                                'overrides': ov.to_dict()}, f)
+                st = AppState()
+                st.load_settings()
+                base = st.overrides.by_lang['']
+                self.assertTrue(base.use_padding)
+                self.assertEqual(base.padding_v, 12.0)
+                self.assertEqual(base.padding_h, 6.0)
+                self.assertFalse(st.overrides.layout.use_padding)
+            finally:
+                if old_cfg is None:
+                    os.environ.pop('XDG_CONFIG_HOME', None)
+                else:
+                    os.environ['XDG_CONFIG_HOME'] = old_cfg
 
     def test_launcher_assets(self):
         """Standalone-launch support: the app icon exists and loads,
@@ -1430,9 +1616,19 @@ class TestPipelineAndQueue(unittest.TestCase):
         self.assertFalse(ed.chk_169.isEnabled())     # AR override wins
         ed.chk_ar.setChecked(False)
         self.assertTrue(ed.chk_169.isEnabled())
-        self.assertFalse(ed.spin_pv.isEnabled())
-        ed.chk_pad.setChecked(True)
-        self.assertTrue(ed.spin_pv.isEnabled())
+        # padding moved to the per-language sets (Spacing & opacity)
+        self.assertFalse(hasattr(ed, 'chk_pad'))
+        from ttml2pgs.core.overrides import StyleOverrides
+        from ttml2pgs.ui.widgets.settings_panel import OverrideEditor
+        so = StyleOverrides()
+        oe = OverrideEditor(so)
+        self.assertEqual(
+            list(oe.sections),
+            ['Font', 'Color', 'Outline & shadow', 'Spacing & opacity'])
+        oe.chk_pad.setChecked(True)
+        oe.spin_ph.setValue(8.0)
+        self.assertTrue(so.use_padding)
+        self.assertEqual(so.padding_h, 8.0)
 
     def test_ruby_baked_inline_and_styles_pruned(self):
         """Ruby roles are baked onto spans at load; role-only styles are

@@ -127,7 +127,10 @@ class CollapsibleSection(QWidget):
     """A ▸/▾ header button + content. All sections share the pane's single
     outer scrollbar — no nested scrolling."""
 
-    def __init__(self, title: str, content: QWidget, expanded: bool = True):
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, title: str, content: QWidget, expanded: bool = True,
+                 outlined: bool = False):
         super().__init__()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
@@ -145,15 +148,26 @@ class CollapsibleSection(QWidget):
         self.btn.setSizePolicy(QSizePolicy.Policy.Expanding,
                                QSizePolicy.Policy.Fixed)
         self.content = content
+        if outlined:
+            # visible frame around the section's contents
+            self.content.setObjectName('secOutline')
+            self.content.setStyleSheet(
+                '#secOutline { border: 1px solid #4a4a4e; '
+                'border-radius: 4px; }')
         self.content.setVisible(expanded)
         lay.addWidget(self.btn)
         lay.addWidget(self.content)
         self.btn.toggled.connect(self._toggle)
 
+    def set_expanded(self, on: bool):
+        if self.btn.isChecked() != on:
+            self.btn.setChecked(on)      # fires _toggle + toggled
+
     def _toggle(self, on: bool):
         self.btn.setArrowType(Qt.ArrowType.DownArrow if on
                               else Qt.ArrowType.RightArrow)
         self.content.setVisible(on)
+        self.toggled.emit(on)
 
 
 def compact(*widgets, width=48):
@@ -320,6 +334,8 @@ class OverrideEditor(QWidget):
         spin.valueChanged.connect(manual_change)
 
         compact(cmb, spin)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
         row.addWidget(cmb, 1)
         row.addWidget(btn)
         row.addWidget(QLabel('α:'))
@@ -328,30 +344,40 @@ class OverrideEditor(QWidget):
         w.setLayout(row)
         return w, cmb, btn, spin
 
-    def __init__(self, so: StyleOverrides):
+    #: shared collapse state — every language tab shows the same
+    #: sections open/closed (also keeps the tab stack's height honest:
+    #: a QTabWidget sizes to its TALLEST page)
+    section_toggled = pyqtSignal(str, bool)
+
+    def __init__(self, so: StyleOverrides,
+                 sec_state: Optional[Dict[str, bool]] = None):
         super().__init__()
         self.so = so
-        # plain form with mini headers — the collapsible box lives OUTSIDE
-        # the language tabs (SettingsPane wraps the whole tab widget), so
-        # collapsing shrinks the pane like every other section.
-        form = QFormLayout(self)
-        form.setRowWrapPolicy(
-            QFormLayout.RowWrapPolicy.WrapLongRows)
-        form.setContentsMargins(10, 4, 6, 6)
-        form.setVerticalSpacing(4)
+        self._sec_state = sec_state if sec_state is not None else {}
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 2, 4, 4)
+        outer.setSpacing(0)
+        self.sections: Dict[str, CollapsibleSection] = {}
 
-        def header(text):
-            lbl = QLabel(text.upper())
-            lbl.setStyleSheet(
-                'color:#cfcfcf; font-weight:bold; font-size:11px; '
-                'margin-top:8px; border-bottom:1px solid #4a4a4a; '
-                'padding-bottom:2px;')
-            form.addRow(lbl)
+        def section(name: str) -> QFormLayout:
+            box = QWidget()
+            form = QFormLayout(box)
+            form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+            form.setContentsMargins(8, 6, 8, 6)
+            form.setVerticalSpacing(3)
+            sec = CollapsibleSection(
+                name, box, expanded=self._sec_state.get(name, True),
+                outlined=True)
+            sec.toggled.connect(
+                lambda on, n=name: self._section_toggled(n, on))
+            outer.addWidget(sec)
+            self.sections[name] = sec
+            return form
 
         families = _installed_families()
 
         # ---- Font ----------------------------------------------------- #
-        header('Font')
+        form = section('Font')
         self.cmb_default_font = QComboBox()
         self.cmb_default_font.setEditable(True)
         self.cmb_default_font.addItem('(auto — v1/Chrome stack)')
@@ -398,7 +424,7 @@ class OverrideEditor(QWidget):
         form.addRow('Stroke weight boost:', self.spin_boost)
 
         # ---- Color ---------------------------------------------------- #
-        header('Color')
+        form = section('Color')
         self.chk_auto = QCheckBox('Auto color by video (SDR/HDR)')
         self.chk_auto.setToolTip(
             'Pick text color/alpha from each target video\'s dynamic '
@@ -409,11 +435,11 @@ class OverrideEditor(QWidget):
         (w_sdr, self.cmb_auto_sdr, self.btn_auto_sdr,
          self.spin_auto_sdr) = self._preset_row(
             so.auto_sdr_color, so.auto_sdr_alpha, 'SDR White')
-        form.addRow('   SDR videos:', w_sdr)
+        form.addRow('SDR videos:', w_sdr)
         (w_hdr, self.cmb_auto_hdr, self.btn_auto_hdr,
          self.spin_auto_hdr) = self._preset_row(
             so.auto_hdr_color, so.auto_hdr_alpha, 'HDR Grey')
-        form.addRow('   HDR videos:', w_hdr)
+        form.addRow('HDR videos:', w_hdr)
         self.chk_color = QCheckBox('Override color (fixed)')
         self.chk_color.setToolTip(
             'Force one fixed color regardless of the video\'s dynamic '
@@ -422,9 +448,11 @@ class OverrideEditor(QWidget):
         form.addRow(self.chk_color, self.btn_color)
 
         # ---- Outline & shadow ----------------------------------------- #
-        header('Outline & shadow')
+        form = section('Outline & shadow')
         self.chk_outline = QCheckBox('Override outline')
         row_o = QHBoxLayout()
+        row_o.setContentsMargins(0, 0, 0, 0)
+        row_o.setSpacing(4)
         self.chk_outline_on = QCheckBox('on')
         self.ed_outline_w = DimEdit(so.outline_width, ['px', 'em', 'vh', '%'])
         self.btn_outline_c = ColorButton(so.outline_color)
@@ -437,6 +465,8 @@ class OverrideEditor(QWidget):
         form.addRow(self.chk_outline, w_o)
         self.chk_shadow = QCheckBox('Override shadow')
         row_s1 = QHBoxLayout()
+        row_s1.setContentsMargins(0, 0, 0, 0)
+        row_s1.setSpacing(4)
         self.chk_shadow_on = QCheckBox('on')
         self.ed_sx = DimEdit(so.shadow_offset_x, ['px', 'em', 'vh'])
         self.ed_sy = DimEdit(so.shadow_offset_y, ['px', 'em', 'vh'])
@@ -449,6 +479,8 @@ class OverrideEditor(QWidget):
         w_s1.setLayout(row_s1)
         form.addRow(self.chk_shadow, w_s1)
         row_s2 = QHBoxLayout()
+        row_s2.setContentsMargins(0, 0, 0, 0)
+        row_s2.setSpacing(4)
         self.ed_sb = DimEdit(so.shadow_blur, ['px', 'em', 'vh'])
         self.btn_shadow_c = ColorButton(so.shadow_color)
         self.spin_salpha = QDoubleSpinBox()
@@ -462,10 +494,10 @@ class OverrideEditor(QWidget):
         row_s2.addWidget(self.spin_salpha)
         w_s2 = QWidget()
         w_s2.setLayout(row_s2)
-        form.addRow('   ', w_s2)
+        form.addRow('', w_s2)
 
         # ---- Spacing & opacity ---------------------------------------- #
-        header('Spacing & opacity')
+        form = section('Spacing & opacity')
         self.chk_lh = QCheckBox('Override line height')
         self.ed_lh = DimEdit(so.line_height, ['', 'em', 'px', 'vh', '%'])
         form.addRow(self.chk_lh, self.ed_lh)
@@ -474,14 +506,37 @@ class OverrideEditor(QWidget):
         self.spin_alpha.setSingleStep(0.05)
         self.spin_alpha.setValue(so.opacity_mult)
         form.addRow('Global opacity:', self.spin_alpha)
+        self.chk_pad = QCheckBox('Safe-area padding')
+        self.chk_pad.setToolTip(
+            'Inset the region anchoring box (v1\'s #pad-box) for THIS '
+            'language — text moves inward, never scales. Preview guide '
+            'lines follow the active file\'s language set.')
+        rowp = QHBoxLayout()
+        rowp.setContentsMargins(0, 0, 0, 0)
+        rowp.setSpacing(4)
+        self.spin_pv = QDoubleSpinBox()
+        self.spin_pv.setRange(0, 40)
+        self.spin_pv.setSuffix(' %V')
+        self.spin_pv.setValue(so.padding_v)
+        self.spin_ph = QDoubleSpinBox()
+        self.spin_ph.setRange(0, 40)
+        self.spin_ph.setSuffix(' %H')
+        self.spin_ph.setValue(so.padding_h)
+        rowp.addWidget(self.spin_pv)
+        rowp.addWidget(self.spin_ph)
+        padw = QWidget()
+        padw.setLayout(rowp)
+        form.addRow(self.chk_pad, padw)
 
         compact(self.spin_boost, self.spin_salpha, self.spin_alpha,
+                self.spin_pv, self.spin_ph,
                 self.cmb_default_font, self.ed_family)
 
         self._load_flags()
         for w in (self.chk_size, self.chk_family, self.chk_color,
                   self.chk_auto, self.chk_outline, self.chk_outline_on,
-                  self.chk_shadow, self.chk_shadow_on, self.chk_lh):
+                  self.chk_shadow, self.chk_shadow_on, self.chk_lh,
+                  self.chk_pad):
             w.toggled.connect(self._commit)
         for w in (self.ed_size, self.ed_outline_w, self.ed_sx, self.ed_sy,
                   self.ed_sb, self.ed_lh):
@@ -496,7 +551,13 @@ class OverrideEditor(QWidget):
         self.spin_auto_sdr.valueChanged.connect(self._commit)
         self.spin_auto_hdr.valueChanged.connect(self._commit)
         self.spin_boost.valueChanged.connect(self._commit)
+        self.spin_pv.valueChanged.connect(self._commit)
+        self.spin_ph.valueChanged.connect(self._commit)
         guard_wheel_children(self)
+
+    def _section_toggled(self, name: str, on: bool):
+        self._sec_state[name] = on
+        self.section_toggled.emit(name, on)
 
     def _load_flags(self):
         so = self.so
@@ -509,6 +570,7 @@ class OverrideEditor(QWidget):
         self.chk_shadow.setChecked(so.override_shadow)
         self.chk_shadow_on.setChecked(so.shadow_enabled)
         self.chk_lh.setChecked(so.override_line_height)
+        self.chk_pad.setChecked(so.use_padding)
 
     def _commit(self, *_):
         so = self.so
@@ -543,6 +605,9 @@ class OverrideEditor(QWidget):
         so.line_height = self.ed_lh.dim()
         so.opacity_mult = self.spin_alpha.value()
         so.weight_boost = self.spin_boost.value()
+        so.use_padding = self.chk_pad.isChecked()
+        so.padding_v = self.spin_pv.value()
+        so.padding_h = self.spin_ph.value()
         self.changed.emit()
 
 
@@ -577,30 +642,16 @@ class LayoutOptionsEditor(QWidget):
         row.addWidget(self.spin_arh)
         arw = QWidget()
         arw.setLayout(row)
-        self.chk_pad = QCheckBox('Safe-area padding')
-        rowp = QHBoxLayout()
-        self.spin_pv = QDoubleSpinBox()
-        self.spin_pv.setRange(0, 40)
-        self.spin_pv.setSuffix(' %V')
-        self.spin_pv.setValue(lo.padding_v)
-        self.spin_ph = QDoubleSpinBox()
-        self.spin_ph.setRange(0, 40)
-        self.spin_ph.setSuffix(' %H')
-        self.spin_ph.setValue(lo.padding_h)
-        rowp.addWidget(self.spin_pv)
-        rowp.addWidget(self.spin_ph)
-        padw = QWidget()
-        padw.setLayout(rowp)
         form.addRow(self.chk_vidims)
         form.addRow('', self.chk_hd)
         form.addRow(self.chk_169)
         form.addRow(self.chk_ar, arw)
-        form.addRow(self.chk_pad, padw)
+        # (safe-area padding is per language — Text style overrides →
+        # Spacing & opacity)
         self._load()
-        for w in (self.chk_vidims, self.chk_hd, self.chk_169, self.chk_ar,
-                  self.chk_pad):
+        for w in (self.chk_vidims, self.chk_hd, self.chk_169, self.chk_ar):
             w.toggled.connect(self._commit)
-        for w in (self.spin_arw, self.spin_arh, self.spin_pv, self.spin_ph):
+        for w in (self.spin_arw, self.spin_arh):
             w.valueChanged.connect(self._commit)
         guard_wheel_children(self)
 
@@ -610,7 +661,6 @@ class LayoutOptionsEditor(QWidget):
         self.chk_hd.setChecked(lo.scale_to_hd)
         self.chk_169.setChecked(lo.force_16_9)
         self.chk_ar.setChecked(lo.override_ar)
-        self.chk_pad.setChecked(lo.use_padding)
         self._sync_enabled()
 
     def _sync_enabled(self):
@@ -627,11 +677,9 @@ class LayoutOptionsEditor(QWidget):
             'aspect differs.')
         # "force 16:9" makes the AR override moot the other way? No —
         # override wins; but it does make the VIDEO AR moot, nothing to
-        # grey. AR/padding spins follow their checkboxes:
+        # grey. AR spins follow their checkbox:
         for w in (self.spin_arw, self.spin_arh):
             w.setEnabled(ar_on)
-        for w in (self.spin_pv, self.spin_ph):
-            w.setEnabled(self.chk_pad.isChecked())
 
     def _commit(self, *_):
         lo = self.lo
@@ -641,9 +689,6 @@ class LayoutOptionsEditor(QWidget):
         lo.override_ar = self.chk_ar.isChecked()
         lo.ar_w = self.spin_arw.value()
         lo.ar_h = self.spin_arh.value()
-        lo.use_padding = self.chk_pad.isChecked()
-        lo.padding_v = self.spin_pv.value()
-        lo.padding_h = self.spin_ph.value()
         self._sync_enabled()
         self.changed.emit()
 
@@ -1024,22 +1069,7 @@ class SettingsPane(QWidget):
         ovl.addWidget(CollapsibleSection('Layout / canvas',
                                          self.layout_editor, expanded=False))
 
-        post = QWidget()
-        pl = QVBoxLayout(post)
-        pl.setContentsMargins(18, 2, 4, 6)
-        self.chk_remux = QCheckBox('Remux into video when its renders finish')
-        self.chk_remux.setChecked(app_settings.get('remux_after_render', True))
-        self.chk_replace = QCheckBox('Replace original video (else *.muxed.mkv)')
-        self.chk_replace.setChecked(app_settings.get('replace_original', True))
-        self.chk_move = QCheckBox("Move sources into a 'subs' subfolder after mux")
-        self.chk_move.setChecked(app_settings.get('move_to_subs_folder', False))
-        for w in (self.chk_remux, self.chk_replace, self.chk_move):
-            pl.addWidget(w)
-            w.toggled.connect(self._post_changed)
-        ovl.addWidget(CollapsibleSection('Post-processing', post,
-                                         expanded=False))
-
-        # (player engine / external player settings live in Preferences)
+        # (post-processing + player settings live in Preferences)
         ovl.addStretch()
 
         scroll = QScrollArea()
@@ -1117,26 +1147,24 @@ class SettingsPane(QWidget):
 
         self._rebuild_lang_tabs()
 
-    # ------------------------------------------------------------------ #
-    def _post_changed(self, *_):
-        self.app_settings['remux_after_render'] = self.chk_remux.isChecked()
-        self.app_settings['replace_original'] = self.chk_replace.isChecked()
-        self.app_settings['move_to_subs_folder'] = self.chk_move.isChecked()
-        self.overrides_changed.emit()
-
     # -- language tabs -------------------------------------------------- #
     def _rebuild_lang_tabs(self):
         # never steal the user's place: restore whichever tab was active
         current = self.lang_tabs.tabText(self.lang_tabs.currentIndex()) \
             if self.lang_tabs.count() else 'Default'
+        # shared section collapse state across every language tab (a tab
+        # stack sizes to its tallest page, so states must stay in step)
+        if not hasattr(self, '_sec_state'):
+            self._sec_state = {}
         self.lang_tabs.blockSignals(True)
         while self.lang_tabs.count():
             self.lang_tabs.removeTab(0)
         for lang in sorted(self.overrides.by_lang.keys(),
                            key=lambda x: (x != '', x)):
             so = self.overrides.by_lang[lang]
-            ed = OverrideEditor(so)
+            ed = OverrideEditor(so, self._sec_state)
             ed.changed.connect(self.overrides_changed.emit)
+            ed.section_toggled.connect(self._sync_sections)
             # the editor sits directly in the tab — the whole overrides
             # tab shares ONE outer scrollbar (no nested scrolling)
             label = lang if lang else 'Default'
@@ -1185,6 +1213,14 @@ class SettingsPane(QWidget):
             it.setData(Qt.ItemDataRole.UserRole,
                        style_hints(self.doc.styles[sid]))
         return it
+
+    def _sync_sections(self, name: str, on: bool):
+        """Mirror a section collapse across every language tab."""
+        for i in range(self.lang_tabs.count()):
+            ed = self.lang_tabs.widget(i)
+            sec = getattr(ed, 'sections', {}).get(name)
+            if sec is not None:
+                sec.set_expanded(on)
 
     def refresh_style_hints(self):
         for i in range(self.style_list.count()):

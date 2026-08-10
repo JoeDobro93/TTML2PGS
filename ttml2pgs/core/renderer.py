@@ -195,7 +195,7 @@ class CueRenderer:
             return None
 
         # region rect (pre-layout; shrink-wrap resolved after)
-        rect = self._region_rect(region)
+        rect = self._region_rect(region, so)
         measure = rect['h'] if vertical else rect['w']
 
         lh_px, lh_factor = self._line_height(para, so)
@@ -246,16 +246,22 @@ class CueRenderer:
         return reg_spec.opacity if reg_spec.opacity is not None else 1.0
 
     # ------------------------------------------------------------------ #
-    def _region_rect(self, region: Region) -> dict:
+    def _region_rect(self, region: Region,
+                     so: Optional[StyleOverrides] = None) -> dict:
         """
         Resolve region geometry to canvas-absolute pixels.
 
         Region positions and %-sizes resolve against the *padded* box
         (v1's #pad-box), while every other unit in the pipeline uses the
         full content rect — safe-area padding moves regions inward
-        without shrinking text.
+        without shrinking text. Padding is per language (from the cue's
+        override set) on top of any canvas-level inset.
         """
         cx, cy, cw, ch = self.canvas.region_box
+        if so is not None and so.use_padding:
+            px = cw * (so.padding_h / 100.0) / 2.0
+            py = ch * (so.padding_v / 100.0) / 2.0
+            cx, cy, cw, ch = cx + px, cy + py, cw - 2 * px, ch - 2 * py
         ctx = UnitContext(
             canvas_w=cw, canvas_h=ch,
             doc_w=self.doc.px_width, doc_h=self.doc.px_height,

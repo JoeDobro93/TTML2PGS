@@ -60,6 +60,7 @@ class PreferencesDialog(QDialog):
         lay.addWidget(self.tabs)
 
         self._build_profiles_tab()
+        self._build_output_tab()
         self._build_player_tab()
         self._build_performance_tab()
 
@@ -159,6 +160,40 @@ class PreferencesDialog(QDialog):
         self.overrides.profiles.pop(key, None)
         self._reload_profiles()
         self.profiles_changed.emit()
+
+    # ------------------------------------------------------------------ #
+    # Output / post-processing
+    # ------------------------------------------------------------------ #
+    def _build_output_tab(self):
+        from PyQt6.QtWidgets import QCheckBox
+        tab = QWidget()
+        vl = QVBoxLayout(tab)
+        vl.addWidget(_hint(
+            'Defaults for what happens after a video\'s renders finish. '
+            'Mux and replace-original can also be flipped per video in '
+            'the queue (right-click the group).'))
+        s = self.app_settings
+        self.chk_remux = QCheckBox(
+            'Remux into video when its renders finish')
+        self.chk_remux.setChecked(s.get('remux_after_render', True))
+        self.chk_replace = QCheckBox(
+            'Replace original video (else *.muxed.mkv)')
+        self.chk_replace.setChecked(s.get('replace_original', True))
+        self.chk_move = QCheckBox(
+            "Move sources into a 'subs' subfolder after mux")
+        self.chk_move.setChecked(s.get('move_to_subs_folder', False))
+        for w in (self.chk_remux, self.chk_replace, self.chk_move):
+            vl.addWidget(w)
+            w.toggled.connect(self._output_changed)
+        vl.addStretch()
+        self.tabs.addTab(tab, 'Output')
+
+    def _output_changed(self, *_):
+        s = self.app_settings
+        s['remux_after_render'] = self.chk_remux.isChecked()
+        s['replace_original'] = self.chk_replace.isChecked()
+        s['move_to_subs_folder'] = self.chk_move.isChecked()
+        self.settings_changed.emit()
 
     # ------------------------------------------------------------------ #
     # Player

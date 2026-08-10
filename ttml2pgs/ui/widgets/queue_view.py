@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional, Tuple
 
-from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QDesktopServices, QKeySequence, \
     QShortcut
 from PyQt6.QtWidgets import (QAbstractItemView, QHBoxLayout, QHeaderView,
@@ -140,11 +140,14 @@ class QueuePane(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
 
+        self._updating = False           # guard: programmatic item edits
+
         # two compact button rows so the pane fits a left/right dock
         self.b_start_all = QPushButton('▶ Render all')
         self.b_start_all.setToolTip(
-            'Start every job in the queue (added jobs become queued and '
-            'render in order).')
+            'Start every CHECKED job whose video is checked too '
+            '(MakeMKV-style: the checkboxes decide what a batch start '
+            'touches). Unchecked rows sit out.')
         self.b_start_sel = QPushButton('▶ Render selected')
         self.b_start_sel.setToolTip(
             'Start only the selected jobs / video groups.')
@@ -193,12 +196,66 @@ class QueuePane(QWidget):
         self.b_resume.clicked.connect(self.queue.resume_all)
         self.b_clear.clicked.connect(self._clear_finished)
         self.tree.customContextMenuRequested.connect(self._menu)
+        self.tree.itemChanged.connect(self._item_check_changed)
+        self.tree.itemSelectionChanged.connect(self._constrain_selection)
 
         # Del removes whatever is selected (running jobs are skipped by
         # the engine; deleting a group cancels + removes it)
         sc = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.tree)
         sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc.activated.connect(self._remove_selected)
+
+    # ------------------------------------------------------------------ #
+    # Checkboxes (MakeMKV-style arming) + selection rules
+    # ------------------------------------------------------------------ #
+    def _item_check_changed(self, item: QTreeWidgetItem, col: int):
+        if self._updating or col != 0:
+            return
+        kind = item.data(1, Qt.ItemDataRole.UserRole)
+        ident = item.data(0, Qt.ItemDataRole.UserRole)
+        on = item.checkState(0) == Qt.CheckState.Checked
+        if kind == 'group':
+            self.queue.set_group_checked(ident, on)
+        elif kind == 'job':
+            self.queue.set_job_checked(ident, on)
+        self.refresh()
+
+    def _constrain_selection(self):
+        """MakeMKV-style selection: one KIND at a time. Shift-selecting
+        group rows never grabs their children; shift-selecting children
+        stays inside the clicked video's group. The prune is deferred a
+        tick — deselecting from inside the selectionChanged signal
+        leaves Qt's per-item isSelected() cache stale."""
+        if self._updating:
+            return
+        cur = self.tree.currentItem()
+        if cur is None:
+            return
+        cur_kind = cur.data(1, Qt.ItemDataRole.UserRole)
+        cur_parent = cur.parent()
+        bad = []
+        for it in self.tree.selectedItems():
+            if it is cur:
+                continue
+            kind = it.data(1, Qt.ItemDataRole.UserRole)
+            if (kind == 'group') != (cur_kind == 'group'):
+                bad.append(it)
+            elif cur_kind != 'group' and it.parent() is not cur_parent:
+                bad.append(it)
+        if not bad:
+            return
+
+        def prune():
+            self._updating = True
+            try:
+                for it in bad:
+                    try:
+                        it.setSelected(False)
+                    except RuntimeError:
+                        pass             # item removed meanwhile
+            finally:
+                self._updating = False
+        QTimer.singleShot(0, prune)
 
     # ------------------------------------------------------------------ #
     # Selection helpers
@@ -299,6 +356,15 @@ class QueuePane(QWidget):
     # In-place refresh (selection/anchor/scroll survive)
     # ------------------------------------------------------------------ #
     def refresh(self):
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            self._refresh_impl()
+        finally:
+            self._updating = False
+
+    def _refresh_impl(self):
         groups = self.queue.snapshot()
 
         # -- top level: prune, insert, reorder --------------------------- #
@@ -358,6 +424,11 @@ class QueuePane(QWidget):
             if it.text(col) != txt:
                 it.setText(col, txt)
         it.setForeground(1, QBrush(QColor(color)))
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        want = Qt.CheckState.Checked if g.checked \
+            else Qt.CheckState.Unchecked
+        if it.checkState(0) != want:
+            it.setCheckState(0, want)
 
     def _sync_children(self, gi: QTreeWidgetItem, g: VideoGroup):
         want_keys = [('job', j.id) for j in g.render_jobs] + \
@@ -399,6 +470,11 @@ class QueuePane(QWidget):
         color = _ADDED_COLOR if label == 'added' \
             else _STATE_COLORS.get(j.state, '#ccc')
         it.setForeground(1, QBrush(QColor(color)))
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        want = Qt.CheckState.Checked if j.checked \
+            else Qt.CheckState.Unchecked
+        if it.checkState(0) != want:
+            it.setCheckState(0, want)
 
     def _update_external_item(self, it: QTreeWidgetItem, e):
         for col, txt in ((0, os.path.basename(e.sup_path)),
@@ -506,7 +582,14 @@ class QueuePane(QWidget):
 
     def _group_menu(self, menu: QMenu, ident: int):
         g = next((x for x in self.queue.snapshot() if x.id == ident), None)
-        a_start = menu.addAction('Start (render) whole group')
+        a_start = menu.addAction('Start (render) checked subtitles')
+        menu.addSeparator()
+        a_sel_all = menu.addAction('Select all subtitles')
+        a_sel_none = menu.addAction('Unselect all subtitles')
+        a_sel_all.triggered.connect(
+            lambda: self.queue.check_all_jobs(ident, True))
+        a_sel_none.triggered.connect(
+            lambda: self.queue.check_all_jobs(ident, False))
         menu.addSeparator()
         a_mux = menu.addAction('Mux into video when renders finish')
         a_mux.setCheckable(True)

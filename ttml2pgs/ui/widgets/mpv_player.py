@@ -88,6 +88,7 @@ class MpvPlayerWidget(QWidget):
         self._last_ids: List[int] = []
         self._duration_ms = 0.0
         self._got_media = False
+        self.loaded_path: Optional[str] = None
         self._osd_resized.connect(self._apply_overlays)
         self._load_check = QTimer(self)
         self._load_check.setSingleShot(True)
@@ -155,6 +156,7 @@ class MpvPlayerWidget(QWidget):
         if self._m is None:
             return
         self._got_media = False
+        self.loaded_path = path
         try:
             self._m.loadfile(path)
             self._m.pause = True
@@ -172,6 +174,7 @@ class MpvPlayerWidget(QWidget):
         remux can replace the video). The player stays alive."""
         self._load_check.stop()
         self._got_media = False
+        self.loaded_path = None
         if self._m is not None:
             try:
                 self._m.command('stop')

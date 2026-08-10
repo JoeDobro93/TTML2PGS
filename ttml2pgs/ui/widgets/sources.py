@@ -89,8 +89,10 @@ class SourcesPane(QWidget):
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
+        # multi-select for bulk close / bulk add-to-queue; the ACTIVE
+        # session still follows the current row alone
         self.table.setSelectionMode(
-            QAbstractItemView.SelectionMode.SingleSelection)
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(22)
         hh = self.table.horizontalHeader()
@@ -115,7 +117,18 @@ class SourcesPane(QWidget):
         self.table.cellDoubleClicked.connect(self._cell_double)
         self.table.itemChanged.connect(self._item_edited)
         self.table.customContextMenuRequested.connect(self._context_menu)
+        from PyQt6.QtGui import QKeySequence, QShortcut
+        sc = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.table)
+        sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc.activated.connect(self._close_selected)
         self._loading = False
+
+    # ------------------------------------------------------------------ #
+    def _selected_rows(self) -> List[int]:
+        rows = sorted({i.row() for i in self.table.selectedItems()})
+        if not rows and self.table.currentRow() >= 0:
+            rows = [self.table.currentRow()]
+        return [r for r in rows if 0 <= r < len(self.state.sessions)]
 
     # ------------------------------------------------------------------ #
     def selected_cues_only(self) -> bool:
@@ -227,16 +240,23 @@ class SourcesPane(QWidget):
         self.add_sup_requested.emit(video, sup)
 
     def _close_selected(self):
-        row = self.table.currentRow()
-        if row < 0:
+        rows = self._selected_rows()
+        if not rows:
             return
-        self.state.close_session(row)
+        if len(rows) > 1:
+            from PyQt6.QtWidgets import QMessageBox
+            if QMessageBox.question(
+                    self, 'Close subtitles',
+                    f'Close {len(rows)} subtitle(s)?') != \
+                    QMessageBox.StandardButton.Yes:
+                return
+        for row in reversed(rows):
+            self.state.close_session(row)
         self.refresh()
         self.session_activated.emit(self.state.active_index)
 
     def _render_selected(self):
-        row = self.table.currentRow()
-        if row >= 0:
+        for row in self._selected_rows():
             self.render_requested.emit(row)
 
     # ------------------------------------------------------------------ #
@@ -303,8 +323,19 @@ class SourcesPane(QWidget):
         row = self.table.rowAt(pos.y())
         if row < 0:
             return
+        rows = self._selected_rows()
+        if row not in rows:
+            self.table.selectRow(row)
+            rows = [row]
+        many = len(rows) > 1
         menu = QMenu(self)
-        a_render = menu.addAction('Add this file to the queue')
+        a_render = menu.addAction(
+            f'Add {len(rows)} selected to the queue' if many
+            else 'Add this file to the queue')
+        a_close = menu.addAction(
+            f'Close {len(rows)} selected\tDel' if many
+            else 'Close this file\tDel')
+        menu.addSeparator()
         a_rematch = menu.addAction('Re-match video from folder')
         a_unbind = menu.addAction('Unbind video')
         a_offset_all = menu.addAction('Copy offset to all files')
@@ -312,7 +343,10 @@ class SourcesPane(QWidget):
         act = menu.exec(self.table.viewport().mapToGlobal(pos))
         sess = self.state.sessions[row]
         if act == a_render:
-            self.render_requested.emit(row)
+            for r in rows:
+                self.render_requested.emit(r)
+        elif act == a_close:
+            self._close_selected()
         elif act == a_rematch:
             sess.auto_match_video()
             self.refresh()
