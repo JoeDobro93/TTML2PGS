@@ -445,7 +445,7 @@ class QueuePane(QWidget):
         self.settings_changed.emit()
 
     def _edit_track_name(self, job_id: int):
-        """Edit the mux track metadata name (e.g. 'ja-en' for merges)."""
+        """Edit the mux track metadata name (e.g. 'ja+en' for merges)."""
         from PyQt6.QtWidgets import QInputDialog
         job = self.queue.find_job(job_id)
         if job is None:
@@ -594,8 +594,11 @@ class QueuePane(QWidget):
             it.setCheckState(0, want)
 
     def _update_external_item(self, it: QTreeWidgetItem, e):
+        info = f'lang={e.lang}'
+        if e.track_name:
+            info += f' · "{e.track_name}"'
         for col, txt in ((0, os.path.basename(e.sup_path)),
-                         (1, 'external'), (2, ''), (3, f'lang={e.lang}')):
+                         (1, 'external'), (2, ''), (3, info)):
             if it.text(col) != txt:
                 it.setText(col, txt)
 
@@ -622,6 +625,8 @@ class QueuePane(QWidget):
                 self._job_menu(menu, ident)
             elif kind == 'group':
                 self._group_menu(menu, ident)
+            elif kind == 'external':
+                self._ext_menu(menu, ident)
             else:
                 a_remove = menu.addAction('Remove from queue\tDel')
                 a_remove.triggered.connect(self._remove_selected)
@@ -739,6 +744,32 @@ class QueuePane(QWidget):
         a_up.triggered.connect(lambda: self.queue.move_job(ident, -1))
         a_down.triggered.connect(lambda: self.queue.move_job(ident, +1))
         a_remove.triggered.connect(lambda: self.queue.remove_job(ident))
+
+    def _ext_menu(self, menu: QMenu, ident: int):
+        e = self.queue.find_external(ident)
+        a_track = menu.addAction('Set mux track name…')
+        a_open = menu.addAction('Open .sup folder')
+        a_open.setEnabled(bool(e))
+        menu.addSeparator()
+        a_remove = menu.addAction('Remove from queue\tDel')
+        a_track.triggered.connect(lambda: self._edit_ext_track_name(ident))
+        a_open.triggered.connect(
+            lambda: self._open_folder(e.sup_path if e else None))
+        a_remove.triggered.connect(lambda: self.queue.remove_job(ident))
+
+    def _edit_ext_track_name(self, ext_id: int):
+        from PyQt6.QtWidgets import QInputDialog
+        e = self.queue.find_external(ext_id)
+        if e is None:
+            return
+        self.before_popup()
+        name, ok = QInputDialog.getText(
+            self, 'Mux track name',
+            'Track name written into the MKV for this subtitle\n'
+            '(empty = no name):', text=e.track_name)
+        if ok:
+            self.queue.set_external_track_name(ext_id, name)
+            self.refresh()
 
     def _group_menu(self, menu: QMenu, ident: int):
         g = next((x for x in self.queue.snapshot() if x.id == ident), None)

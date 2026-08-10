@@ -1517,14 +1517,17 @@ class TestPipelineAndQueue(unittest.TestCase):
         self.assertEqual(parse_sup_name('Ep.ja.sup'), ('ja', '', False))
         self.assertEqual(parse_sup_name('Ep.en.forced.sup'),
                          ('en', '', True))
+        # combo names: the '.forced' is the merged-in SECONDARY —
+        # the track label keeps the whole chain but the track itself
+        # is a full-dialogue, NON-forced subtitle
         self.assertEqual(parse_sup_name('Ep.ja+en.forced.sup'),
-                         ('ja', 'ja-en.forced', True))
+                         ('ja', 'ja+en.forced', False))
         self.assertEqual(parse_sup_name('Ep.en+ja.sup'),
-                         ('en', 'en-ja', False))
+                         ('en', 'en+ja', False))
         self.assertEqual(parse_sup_name('Ep.sup'), ('und', '', False))
         # nonstandard codes normalize ('jp' → ja, 'eng' → en)
         self.assertEqual(parse_sup_name('Show.S01E10.jp+eng.forced.sup'),
-                         ('ja', 'ja-en.forced', True))
+                         ('ja', 'ja+en.forced', False))
         self.assertEqual(subtitle_stem('Show.S01E01.ja+en.forced.sup'),
                          'Show.S01E01')
 
@@ -1558,13 +1561,61 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(len(g.external_sups), 2)
             by_path = {e.sup_path: e for e in g.external_sups}
             self.assertEqual(by_path[s_merged].lang, 'ja')
-            self.assertEqual(by_path[s_merged].track_name, 'ja-en.forced')
+            self.assertEqual(by_path[s_merged].track_name, 'ja+en.forced')
             self.assertEqual(by_path[s_forced].lang, 'en')
             self.assertEqual(by_path[s_forced].track_name, '')
             # re-adding the same .sup replaces, never duplicates
             pane.queue_sup_files([s_merged])
             (g,) = q.snapshot()
             self.assertEqual(len(g.external_sups), 2)
+            # track names of queued .sups are editable (persisted)
+            ent = next(e for e in g.external_sups
+                       if e.sup_path == s_merged)
+            q.set_external_track_name(ent.id, 'Japanese + signs')
+            self.assertEqual(
+                q.find_external(ent.id).track_name, 'Japanese + signs')
+
+    def test_mux_forced_flags_from_names(self):
+        """At the mux boundary: '.en.forced' carries the forced flag,
+        but a merged '.ja+en.forced' does NOT — it's a full-dialogue
+        Japanese track whose label keeps the tag chain."""
+        from ttml2pgs.core import jobqueue
+        from ttml2pgs.core.jobqueue import JobState, QueueManager
+        captured = {}
+
+        def fake_remux(video, subs, replace_original=True,
+                       progress=None, cancel=None):
+            captured['subs'] = list(subs)
+            return True, video
+
+        orig = jobqueue.remux
+        jobqueue.remux = fake_remux
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                v = os.path.join(td, 'ep1.mkv')
+                merged = os.path.join(td, 'ep1.ja+en.forced.sup')
+                plainf = os.path.join(td, 'ep1.en.forced.sup')
+                for p in (v, merged, plainf):
+                    open(p, 'wb').write(b'x')
+                q = QueueManager()             # never started: no threads
+                j = q.add_render(None, 'ep1.en.forced.vtt',
+                                 RenderSettings(out_path=plainf),
+                                 OverrideSet(), video_path=v, lang='en')
+                j.state = JobState.DONE
+                q.add_external_sup(v, merged, lang='ja',
+                                   track_name='ja+en.forced')
+                (g,) = q.snapshot()
+                q._run_mux(g)
+                by = {os.path.basename(s.path): s
+                      for s in captured['subs']}
+                self.assertTrue(by['ep1.en.forced.sup'].forced)
+                self.assertFalse(by['ep1.ja+en.forced.sup'].forced)
+                self.assertEqual(by['ep1.ja+en.forced.sup'].track_name,
+                                 'ja+en.forced')
+                self.assertEqual(by['ep1.ja+en.forced.sup'].lang, 'ja')
+                self.assertEqual(g.mux_state, JobState.DONE)
+        finally:
+            jobqueue.remux = orig
 
     def test_bulk_mux_toggles_in_queue_pane(self):
         """Round 28: the multi-select context menu's mux settings apply
@@ -3116,8 +3167,8 @@ class TestMergeMode(unittest.TestCase):
                              'Episode01.ja+en.forced.sup')
             from ttml2pgs.core.merge import merged_track_name
             self.assertEqual(merged_track_name('ja', 'en+forced'),
-                             'ja-en.forced')
-            self.assertEqual(merged_track_name('ja', 'en'), 'ja-en')
+                             'ja+en.forced')
+            self.assertEqual(merged_track_name('ja', 'en'), 'ja+en')
             # every merged cue renders
             canvas = compute_canvas((1920, 1080), OverrideSet().layout)
             r = CueRenderer(m, canvas, OverrideSet())

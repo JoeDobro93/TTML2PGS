@@ -155,8 +155,10 @@ def cmd_render(args) -> int:
 
     if args.mux and args.video:
         print("Muxing...")
+        from .core.video import parse_sup_name
         ok, res = remux(args.video,
-                        [SubTrack(path=result, lang=doc.language)],
+                        [SubTrack(path=result, lang=doc.language,
+                                  forced=parse_sup_name(result)[2])],
                         progress=lambda c, t, m: None)
         print(f"Mux: {'OK → ' + res if ok else 'FAILED: ' + res}")
         return 0 if ok else 2

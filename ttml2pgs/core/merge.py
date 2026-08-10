@@ -167,11 +167,13 @@ def merged_display_name(primary_path: str, secondary_path: str) -> str:
 
 
 def merged_track_name(primary_variant: str, secondary_variant: str) -> str:
-    """Mux track metadata name for a merged pair: 'ja-en', or
-    'ja-en.forced' when the secondary is a forced track."""
+    """Mux track metadata name for a merged pair — the same tag chain
+    the output FILENAME carries: 'ja+en', or 'ja+en.forced' when the
+    secondary is a forced track. (The track itself is NOT flagged
+    forced — it holds the full primary dialogue.)"""
     def tag(v: str) -> str:
         return v.replace('+forced', '.forced')
-    return f'{tag(primary_variant)}-{tag(secondary_variant)}'
+    return f'{tag(primary_variant)}+{tag(secondary_variant)}'
 
 
 def merged_out_path(primary_path: str, video_path: Optional[str],

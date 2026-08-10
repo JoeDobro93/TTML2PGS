@@ -42,7 +42,7 @@ class DocumentSession:                  # unique objects (and hashable —
     dirty: bool = False
     #: merge mode: source file names ("A.ja.vtt | B.en.forced.vtt")
     merged_from: List[str] = field(default_factory=list)
-    #: mux track metadata name ('' = none; merged pairs get 'ja-en')
+    #: mux track metadata name ('' = none; merged pairs get 'ja+en')
     track_name: str = ''
     #: uid of the last selected cue, restored when switching back
     last_cue_uid: Optional[int] = None

@@ -351,6 +351,23 @@ class QueueManager:
                 j.track_name = (name or '').strip()
         self._notify()
 
+    def find_external(self, ext_id: int):
+        with self._lock:
+            for g in self.groups:
+                for e in g.external_sups:
+                    if e.id == ext_id:
+                        return e
+        return None
+
+    def set_external_track_name(self, ext_id: int, name: str):
+        """Mux track metadata name for a queued external .sup."""
+        with self._lock:
+            for g in self.groups:
+                for e in g.external_sups:
+                    if e.id == ext_id:
+                        e.track_name = (name or '').strip()
+        self._notify()
+
     def set_group_checked(self, group_id: int, on: bool):
         with self._lock:
             for g in self.groups:
@@ -636,15 +653,19 @@ class QueueManager:
 
     def _run_mux(self, group: VideoGroup):
         self._notify()
+        from .video import parse_sup_name
         subs: List[SubTrack] = []
         for j in group.render_jobs:
             if j.state == JobState.DONE and os.path.exists(j.settings.out_path):
                 subs.append(SubTrack(path=j.settings.out_path, lang=j.lang,
-                                     track_name=j.track_name))
+                                     track_name=j.track_name,
+                                     forced=parse_sup_name(
+                                         j.settings.out_path)[2]))
         for e in group.external_sups:
             if os.path.exists(e.sup_path):
                 subs.append(SubTrack(path=e.sup_path, lang=e.lang,
-                                     track_name=e.track_name))
+                                     track_name=e.track_name,
+                                     forced=parse_sup_name(e.sup_path)[2]))
         if not subs:
             with self._lock:
                 group.mux_state = JobState.FAILED

@@ -143,27 +143,30 @@ def subtitle_stem(path: str) -> str:
 
 def parse_sup_name(path: str) -> Tuple[str, str, bool]:
     """
-    (language, mux track name, forced) from a .sup's extension chain —
-    the inverse of the app's own output naming:
+    (language, mux track name, forced flag) from a .sup's extension
+    chain — the inverse of the app's own output naming:
 
         'Ep.ja.sup'           → ('ja', '', False)
         'Ep.en.forced.sup'    → ('en', '', True)
-        'Ep.ja+en.forced.sup' → ('ja', 'ja-en.forced', True)   merged
-        'Ep.en+ja.sup'        → ('en', 'en-ja', False)
+        'Ep.ja+en.forced.sup' → ('ja', 'ja+en.forced', False)  merged
+        'Ep.en+ja.sup'        → ('en', 'en+ja', False)
         'Ep.sup'              → ('und', '', False)
 
-    A 'x+y' combo speaks the FIRST language; the track label keeps the
-    whole combo ('-'-joined, '.forced' appended — the merge naming).
+    A 'x+y' combo speaks the FIRST language and keeps the whole tag
+    chain as its track label. Its '.forced' belongs to the merged-in
+    SECONDARY (forced signs inside a full dialogue track), so the
+    track itself is NOT flagged forced — only a plain
+    single-language '.forced' name is.
     """
     from .parsers import LANG_TOKENS
     name = os.path.basename(path)
     parts = name.split('.')[:-1] if '.' in name else [name]
-    forced = False
+    saw_forced = False
     combo: List[str] = []
     while len(parts) > 1:
         tok = parts[-1].lower()
         if tok in _STEM_DROP:
-            forced = forced or tok == 'forced'
+            saw_forced = saw_forced or tok == 'forced'
             parts.pop()
             continue
         pieces = [p for p in tok.split('+') if p]
@@ -174,12 +177,12 @@ def parse_sup_name(path: str) -> Tuple[str, str, bool]:
             continue
         break
     lang = combo[0] if combo else 'und'
-    track = ''
     if len(combo) > 1:
-        track = '-'.join(combo)
-        if forced:
+        track = '+'.join(combo)
+        if saw_forced:
             track += '.forced'
-    return lang, track, forced
+        return lang, track, False
+    return lang, '', saw_forced
 
 
 def find_matching_video(sub_path: str,
@@ -425,8 +428,12 @@ def _remux_mkvmerge(exe, video_path, subs, out_path, progress, cancel
         cmd += ['--language', f"0:{mux_language(s.lang)}"]
         if s.track_name:
             cmd += ['--track-name', f"0:{s.track_name}"]
+        # forced comes from the CALLER (parse_sup_name semantics): a
+        # '.forced' inside a 'ja+en.forced' combo is the merged-in
+        # secondary, not this track — a raw filename check would
+        # wrongly flag full-dialogue merged tracks as forced-only
         cmd += ['--forced-display-flag',
-                f"0:{'yes' if s.forced or is_forced_name(s.path) else 'no'}"]
+                f"0:{'yes' if s.forced else 'no'}"]
         cmd += ['--default-track-flag', f"0:{'yes' if s.default else 'no'}"]
         cmd.append(s.path)
     try:
@@ -470,8 +477,7 @@ def _remux_ffmpeg(video_path, subs, out_path) -> Tuple[bool, str]:
         cmd += [f'-metadata:s:s:{i}', f'language={mux_language(s.lang)}']
         if s.track_name:
             cmd += [f'-metadata:s:s:{i}', f'title={s.track_name}']
-        forced = s.forced or is_forced_name(s.path)
-        cmd += [f'-disposition:s:s:{i}', 'forced' if forced else '0']
+        cmd += [f'-disposition:s:s:{i}', 'forced' if s.forced else '0']
     cmd.append(out_path)
     try:
         r = _run(cmd, timeout=3600)
