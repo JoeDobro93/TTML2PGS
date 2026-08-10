@@ -1046,6 +1046,39 @@ class TestExportFidelity(unittest.TestCase):
         sess.last_cue_uid = target.uid
         self.assertEqual(sess.last_cue_uid, target.uid)
 
+    def test_time_tools_timecode_and_section_greying(self):
+        """Round 24: shift amount is a HH:MM:SS.mmm timecode with a
+        direction picker (Subtitle Edit style), and the non-selected
+        mode's section is greyed out."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import QTime
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.cue_table import TimeToolsDialog
+        dlg = TimeToolsDialog(has_selection=False)
+        self.assertEqual(dlg.time_amount.displayFormat(), 'HH:mm:ss.zzz')
+        # shift mode is default: its box live, conform greyed
+        self.assertTrue(dlg.shift_box.isEnabled())
+        self.assertFalse(dlg.conform_box.isEnabled())
+        dlg.rb_conform.setChecked(True)
+        self.assertFalse(dlg.shift_box.isEnabled())
+        self.assertTrue(dlg.conform_box.isEnabled())
+        dlg.rb_shift.setChecked(True)
+
+        dlg.time_amount.setTime(QTime(0, 0, 20, 609))
+        scope, ms, plan = dlg.result_action()
+        self.assertIsNone(plan)
+        self.assertEqual(ms, 20609.0)
+        dlg.rb_earlier.setChecked(True)
+        _, ms, _ = dlg.result_action()
+        self.assertEqual(ms, -20609.0)
+        # the mode radios and the direction radios are separate groups
+        self.assertTrue(dlg.rb_shift.isChecked())
+
     def test_close_popout_before_dialogs(self):
         """Round 23: any dialog first closes the (stay-on-top) pop-out
         so it can't sit in front of / block the new window."""

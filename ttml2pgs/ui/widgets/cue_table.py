@@ -10,13 +10,13 @@ from fractions import Fraction
 from typing import List, Optional
 
 from PyQt6.QtCore import (QAbstractTableModel, QModelIndex,
-                          QSortFilterProxyModel, Qt, pyqtSignal)
-from PyQt6.QtWidgets import (QAbstractItemView, QComboBox, QDialog,
-                             QDialogButtonBox, QDoubleSpinBox, QFormLayout,
+                          QSortFilterProxyModel, Qt, QTime, pyqtSignal)
+from PyQt6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox,
+                             QDialog, QDialogButtonBox, QFormLayout,
                              QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                              QMenu, QPushButton, QRadioButton,
-                             QStyledItemDelegate, QTableView, QVBoxLayout,
-                             QWidget, QCheckBox)
+                             QStyledItemDelegate, QTableView, QTimeEdit,
+                             QVBoxLayout, QWidget, QCheckBox)
 
 from ...core.model import Cue, SpanNode, SubtitleDocument
 from ...core.timing import (COMMON_RATES, RetimePlan, format_display_time,
@@ -916,28 +916,50 @@ class TimeToolsDialog(QDialog):
         lay = QVBoxLayout(self)
 
         # -- shift group ------------------------------------------------ #
-        self.rb_shift = QRadioButton('Shift by amount (ms)')
+        self.rb_shift = QRadioButton('Shift by amount')
         self.rb_shift.setChecked(True)
         lay.addWidget(self.rb_shift)
-        form = QFormLayout()
-        self.spin_ms = QDoubleSpinBox()
-        self.spin_ms.setRange(-3_600_000, 3_600_000)
-        self.spin_ms.setDecimals(0)
-        self.spin_ms.setSingleStep(100)
-        form.addRow('Amount:', self.spin_ms)
+        self.shift_box = QWidget()          # one widget so the whole
+        form = QFormLayout(self.shift_box)  # section greys together
+        form.setContentsMargins(24, 0, 0, 0)
+        self.time_amount = QTimeEdit()
+        self.time_amount.setDisplayFormat('HH:mm:ss.zzz')
+        self.time_amount.setTime(QTime(0, 0, 0, 0))
+        self.time_amount.setToolTip(
+            'Click a field (hours/minutes/seconds/ms) and use the '
+            'arrows, wheel or type. Direction is picked below.')
+        form.addRow('Hour:min:sec.ms:', self.time_amount)
+        dir_row = QHBoxLayout()
+        self.rb_later = QRadioButton('Later  (+)')
+        self.rb_earlier = QRadioButton('Earlier  (−)')
+        # explicit groups: Qt's auto-exclusive scan is RECURSIVE from
+        # the parent, so without these the nested direction pair and
+        # the mode pair bleed into one broken group
+        self._grp_dir = QButtonGroup(self)
+        self._grp_dir.addButton(self.rb_later)
+        self._grp_dir.addButton(self.rb_earlier)
+        self.rb_later.setChecked(True)
+        dir_row.addWidget(self.rb_later)
+        dir_row.addWidget(self.rb_earlier)
+        dir_row.addStretch()
+        form.addRow('Direction:', dir_row)
         self.cmb_scope = QComboBox()
         self.cmb_scope.addItems(['All cues', 'Selected cues',
                                  'Selected + all after'])
         if not has_selection:
             self.cmb_scope.setCurrentIndex(0)
         form.addRow('Apply to:', self.cmb_scope)
-        lay.addLayout(form)
+        lay.addWidget(self.shift_box)
+
+        lay.addSpacing(18)
 
         # -- conform group ---------------------------------------------- #
         self.rb_conform = QRadioButton(
             'Frame-rate conform (subtitle master fps → video fps)')
         lay.addWidget(self.rb_conform)
-        form2 = QFormLayout()
+        self.conform_box = QWidget()
+        form2 = QFormLayout(self.conform_box)
+        form2.setContentsMargins(24, 0, 0, 0)
         self.cmb_src = QComboBox()
         self.cmb_dst = QComboBox()
         for label, frac in COMMON_RATES:
@@ -954,7 +976,16 @@ class TimeToolsDialog(QDialog):
             'a 23.976 master keeps real time — no conform needed.')
         self.lbl_note.setWordWrap(True)
         form2.addRow(self.lbl_note)
-        lay.addLayout(form2)
+        lay.addWidget(self.conform_box)
+
+        self._grp_mode = QButtonGroup(self)
+        self._grp_mode.addButton(self.rb_shift)
+        self._grp_mode.addButton(self.rb_conform)
+
+        # grey out whichever mode isn't selected
+        self.rb_shift.toggled.connect(self._sync_sections)
+        self.rb_conform.toggled.connect(self._sync_sections)
+        self._sync_sections()
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
                                    QDialogButtonBox.StandardButton.Cancel)
@@ -962,10 +993,21 @@ class TimeToolsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         lay.addWidget(buttons)
 
+    def _sync_sections(self, *_):
+        self.shift_box.setEnabled(self.rb_shift.isChecked())
+        self.conform_box.setEnabled(self.rb_conform.isChecked())
+
+    def shift_ms(self) -> float:
+        """Signed shift from the timecode + direction controls."""
+        t = self.time_amount.time()
+        ms = (((t.hour() * 60 + t.minute()) * 60 + t.second()) * 1000
+              + t.msec())
+        return float(-ms if self.rb_earlier.isChecked() else ms)
+
     def result_action(self):
         if self.rb_conform.isChecked():
             src: Fraction = self.cmb_src.currentData()
             dst: Fraction = self.cmb_dst.currentData()
             return 'all', 0.0, RetimePlan.conform(src, dst)
         scope = ['all', 'selected', 'after'][self.cmb_scope.currentIndex()]
-        return scope, self.spin_ms.value(), None
+        return scope, self.shift_ms(), None
