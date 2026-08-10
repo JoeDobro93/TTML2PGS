@@ -214,6 +214,8 @@ class MainWindow(QMainWindow):
             self.cue_pane.set_document(None)
             self.settings_pane.set_document(None)
             self.sel_cue_pane.set_cue(None, None)
+            self.preview_pane.clear_context()
+            self.setWindowTitle('TTML2PGS 2 — direct-render subtitle studio')
             return
         self.cue_pane.set_document(sess.doc)
         self.settings_pane.set_document(sess.doc)

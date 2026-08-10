@@ -518,8 +518,15 @@ class CueRenderer:
                      parent_px: float, initial: bool = False,
                      region: Optional[Region] = None,
                      override: Optional[Style] = None,
-                     profile: Optional[Style] = None) -> float:
-        """Resolve the font size specified *directly* on this node."""
+                     profile: Optional[Style] = None,
+                     no_absolute: bool = False) -> float:
+        """Resolve the font size specified *directly* on this node.
+
+        no_absolute — a forced per-language size override is active:
+        ABSOLUTE sizes on inner spans (vh/px/c…) are ignored so the
+        override actually wins, while relative sizes (%/em) still
+        scale against it (small-text spans stay proportionally small).
+        """
         fs: Optional[Dim] = None
         if initial:
             # profile fallback sits below the document's own initials
@@ -536,6 +543,8 @@ class CueRenderer:
             else Style()
         if spec.font_size is not None:
             fs = spec.font_size
+        if no_absolute and fs is not None and fs.unit not in ('%', 'em'):
+            fs = None
         if override is not None and override.font_size is not None:
             fs = override.font_size
         if fs is None:
@@ -564,7 +573,8 @@ class CueRenderer:
             # span
             child_lang = child.meta.get('lang', lang)
             new_font = self._own_font_px(doc, child.style_refs,
-                                         child.inline_style, state.font_px)
+                                         child.inline_style, state.font_px,
+                                         no_absolute=so.override_font_size)
             spec = doc.specified_style(child.style_refs, child.inline_style)
             new_opacity = state.opacity * (spec.opacity
                                            if spec.opacity is not None else 1.0)
@@ -577,7 +587,8 @@ class CueRenderer:
 
             if computed.ruby == 'container':
                 item = self._build_ruby(child, sub, region, ov_style,
-                                        child_lang, vertical, computed)
+                                        child_lang, vertical, computed,
+                                        so)
                 if item is not None:
                     items.append(item)
                     continue
@@ -592,7 +603,9 @@ class CueRenderer:
 
     def _build_ruby(self, container, state: '_WalkState', region: Region,
                     ov_style: Style, lang: str, vertical: bool,
-                    container_computed: ComputedStyle) -> Optional[RubyItem]:
+                    container_computed: ComputedStyle,
+                    so: Optional[StyleOverrides] = None
+                    ) -> Optional[RubyItem]:
         doc = self.doc
         base_items: List[TextItem] = []
         ann_items: List[TextItem] = []
@@ -609,8 +622,9 @@ class CueRenderer:
                 elif ch.kind == 'br':
                     continue
                 else:
-                    nf = self._own_font_px(doc, ch.style_refs,
-                                           ch.inline_style, st.font_px)
+                    nf = self._own_font_px(
+                        doc, ch.style_refs, ch.inline_style, st.font_px,
+                        no_absolute=bool(so and so.override_font_size))
                     sub = _WalkState(
                         chain=st.chain + [(ch.style_refs, ch.inline_style)],
                         font_px=nf, opacity=st.opacity)

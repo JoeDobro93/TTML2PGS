@@ -858,6 +858,36 @@ class PreviewPane(QWidget):
                 self._mpv.load(video_path)
         self.schedule_render()
 
+    def clear_context(self):
+        """All files closed: blank the preview completely — no stale
+        frame, no playable video, no region boxes."""
+        self.doc = None
+        self.cue = None
+        self.video_path = None
+        self.video_res = None
+        self._invalidate_renders()
+        self._rebuild_cue_index()
+        if self.chk_player.isChecked():
+            self.chk_player.setChecked(False)     # back to stills mode
+        if self._mpv is not None:
+            self._mpv.unload()
+        if self._player is not None:
+            try:
+                self._player.stop()
+                self._player.setSource(QUrl())
+            except Exception:
+                pass
+        for stage in filter(None, [self.stage,
+                                   self.popout.stage if self.popout
+                                   else None]):
+            stage.scene = None
+            stage._frame_pix = None
+            stage._cue_pixmaps = []
+            stage.update()
+        self.player_view.set_region_boxes([])
+        self.player_view.set_padding_guide(None)
+        self.lbl_info.setText('')
+
     def _ctx(self) -> Optional[_RenderContext]:
         if self.doc is None:
             return None

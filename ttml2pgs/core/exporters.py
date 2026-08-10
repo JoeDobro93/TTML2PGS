@@ -393,7 +393,10 @@ def _region_to_cue_settings(doc: SubtitleDocument, cue: Cue) -> str:
         elif da == 'center':
             parts.append(f"line:{y0 + h / 2.0:g}%,center")
         else:
-            parts.append(f"line:{max(0.0, min(100.0, y0)):g}%")
+            # explicit ',start': bare high percentages get bottom-
+            # anchored by many players (and our importer) — before-
+            # aligned text must grow DOWN from the line
+            parts.append(f"line:{max(0.0, min(100.0, y0)):g}%,start")
         x0, w = _axis_span(region.x_edge, region.x, region.width,
                            True, 90.0)
         if ta == 'center':

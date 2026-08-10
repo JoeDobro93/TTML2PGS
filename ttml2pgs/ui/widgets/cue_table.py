@@ -510,6 +510,12 @@ class CuePane(QWidget):
         self.table.setItemDelegateForColumn(COL_STYLE,
                                             StyleDelegate(self.model, self))
         self.model.bulk_targets = self.selected_cues
+        self.table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_menu)
+        # single click opens the Region/Style pickers (other columns
+        # keep double-click editing)
+        self.table.clicked.connect(self._cell_clicked)
         lay.addWidget(self.table)
 
         # connections
@@ -712,6 +718,45 @@ class CuePane(QWidget):
             self._set_col_filter(section, None)
         elif chosen in acts:
             self._set_col_filter(section, acts[chosen])
+
+    def _cell_clicked(self, index):
+        if index.column() in (COL_REGION, COL_STYLE):
+            self.table.edit(index)
+
+    def _table_menu(self, pos):
+        """Right-click: bulk region/style assignment for the whole
+        selection."""
+        if self.doc is None:
+            return
+        cues = self.selected_cues()
+        if not cues:
+            return
+        n = len(cues)
+        menu = QMenu(self)
+        acts = {}
+        m_reg = menu.addMenu(f'Change region ({n} cue{"s" if n > 1 else ""})')
+        for label, rid in [('(default)', None)] + \
+                [(r, r) for r in self.doc.regions.keys()
+                 if not r.startswith('__')]:
+            a = m_reg.addAction(label)
+            acts[a] = ('region', rid)
+        m_sty = menu.addMenu(f'Change style ({n} cue{"s" if n > 1 else ""})')
+        for label, sid in [('default (none)', None)] + \
+                [(s, s) for s in sorted(self.doc.styles.keys())
+                 if not s.startswith('__')]:
+            a = m_sty.addAction(label)
+            acts[a] = ('style', sid)
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen not in acts:
+            return
+        kind, val = acts[chosen]
+        for c in cues:
+            if kind == 'region':
+                c.region_id = val
+            else:
+                c.style_refs = [] if val is None else [val]
+        self.model.refresh_order()
+        self.cues_changed.emit()
 
     def _on_selection(self, *_):
         self.cue_selected.emit(self.current_cue())

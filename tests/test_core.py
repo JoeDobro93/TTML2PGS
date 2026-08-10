@@ -823,8 +823,10 @@ class TestExportFidelity(unittest.TestCase):
         ja_line = next(l for l in text.splitlines() if '00:00:01.000' in l)
         en_line = next(l for l in text.splitlines() if '00:00:01.500' in l)
         # ja: bottom band 3.5vh + 15vh tall, display before → text top
-        # at 81.5%; centered 80% wide → NO position setting
-        self.assertIn('line:81.5%', ja_line)
+        # at 81.5% with EXPLICIT start alignment (bare high percentages
+        # get bottom-anchored by players and our importer);
+        # centered 80% wide → NO position setting
+        self.assertIn('line:81.5%,start', ja_line)
         self.assertIn('size:80%', ja_line)
         self.assertNotIn('position:', ja_line)
         # en: full-width band at 65.75%+15% with after-aligned text →
@@ -868,6 +870,67 @@ class TestExportFidelity(unittest.TestCase):
 
         srt = export_srt(doc, overrides=ov, is_hdr=False)
         self.assertIn('<font color="#ffee8c">Hello.</font>', srt)
+
+    def test_vtt_roundtrip_keeps_stacked_bands_separate(self):
+        """Exported VTT re-imported must keep the stacked ja/en bands
+        stacked — the ja before-aligned band grows DOWN from its line,
+        never up into the en band above it."""
+        doc = self._band_doc()
+        vtt = export_vtt(doc)
+        doc2 = VTTParser().parse_string(vtt)
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        r = CueRenderer(doc2, canvas)
+        ja = next(c for c in doc2.cues if 'こんにちは' in c.plain_text())
+        en = next(c for c in doc2.cues if 'Hello' in c.plain_text())
+        rja, ren = r.render_cue(ja), r.render_cue(en)
+        self.assertGreaterEqual(rja.y, 0.815 * 1080 - 2,
+                                'ja text must start at its line')
+        self.assertLessEqual(ren.y + ren.height, rja.y + 1,
+                             'en band must sit fully above the ja band')
+
+    def test_font_size_override_beats_absolute_span_sizes(self):
+        """A forced per-language font size must win over spans that
+        carry ABSOLUTE sizes (e.g. re-imported exports with vh sizes in
+        ::cue classes); relative %/em spans still scale against it."""
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, 's.ja.vtt')
+            with open(p, 'w', encoding='utf-8') as f:
+                f.write('WEBVTT\n\nSTYLE\n::cue(.big) {\n'
+                        '  font-size: 3.25vh;\n}\n\n'
+                        '00:00:01.000 --> 00:00:02.000\n'
+                        '<c.big>こんにちは</c>\n')
+            doc = load_subtitle(p)
+        doc.language = 'ja'
+        for c in doc.cues:
+            c.lang = 'ja'
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        h0 = CueRenderer(doc, canvas).render_cue(doc.cues[0]).height
+        ov = OverrideSet()
+        ov.by_lang[''].override_font_size = True
+        ov.by_lang[''].font_size = Dim(6.0, 'vh')
+        h1 = CueRenderer(doc, canvas, ov).render_cue(doc.cues[0]).height
+        self.assertGreater(h1, h0 * 1.4,
+                           'override must beat the absolute span size')
+
+    def test_preview_clears_when_all_files_closed(self):
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.preview import PreviewPane
+        doc = self._band_doc()
+        pane = PreviewPane()
+        pane.set_context(doc, OverrideSet(), None, (1920, 1080), {})
+        self.assertIsNotNone(pane.doc)
+        pane.clear_context()
+        self.assertIsNone(pane.doc)
+        self.assertIsNone(pane.video_path)
+        self.assertIsNone(pane.stage.scene)
+        self.assertFalse(pane.chk_player.isChecked())
+        pane.worker_thread.quit() if hasattr(pane, 'worker_thread') else None
 
     def test_region_hint_updates_on_edit(self):
         """Moving a region across the midline flips its position hint
