@@ -506,6 +506,16 @@ class OverrideEditor(QWidget):
         self.chk_lh = QCheckBox('Override line height')
         self.ed_lh = DimEdit(so.line_height, ['', 'em', 'px', 'vh', '%'])
         form.addRow(self.chk_lh, self.ed_lh)
+        self.spin_lspace = QDoubleSpinBox()
+        self.spin_lspace.setRange(0.5, 2.0)
+        self.spin_lspace.setSingleStep(0.05)
+        self.spin_lspace.setValue(so.line_spacing)
+        self.spin_lspace.setToolTip(
+            'Multiplies the gap between a cue\'s lines (1 = default; '
+            '<1 tighter, >1 wider). Lines can never overlap, and '
+            'furigana always keeps its reserved space between lines — '
+            'tightening squeezes the empty leading only.')
+        form.addRow('Line spacing ×:', self.spin_lspace)
         self.spin_alpha = QDoubleSpinBox()
         self.spin_alpha.setRange(0, 1)
         self.spin_alpha.setSingleStep(0.05)
@@ -534,7 +544,7 @@ class OverrideEditor(QWidget):
         form.addRow(self.chk_pad, padw)
 
         compact(self.spin_boost, self.spin_salpha, self.spin_alpha,
-                self.spin_pv, self.spin_ph,
+                self.spin_pv, self.spin_ph, self.spin_lspace,
                 self.cmb_default_font, self.ed_family)
 
         self._load_flags()
@@ -558,6 +568,7 @@ class OverrideEditor(QWidget):
         self.spin_boost.valueChanged.connect(self._commit)
         self.spin_pv.valueChanged.connect(self._commit)
         self.spin_ph.valueChanged.connect(self._commit)
+        self.spin_lspace.valueChanged.connect(self._commit)
         guard_wheel_children(self)
 
     def _section_toggled(self, name: str, on: bool):
@@ -608,6 +619,7 @@ class OverrideEditor(QWidget):
         so.shadow_alpha = self.spin_salpha.value()
         so.override_line_height = self.chk_lh.isChecked()
         so.line_height = self.ed_lh.dim()
+        so.line_spacing = self.spin_lspace.value()
         so.opacity_mult = self.spin_alpha.value()
         so.weight_boost = self.spin_boost.value()
         so.use_padding = self.chk_pad.isChecked()

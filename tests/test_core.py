@@ -508,6 +508,44 @@ class TestRendering(unittest.TestCase):
         other = CueRenderer(self.doc, canvas, ov2).render_cue(cue)
         self.assertEqual((plain.x, plain.y), (other.x, other.y))
 
+    def test_line_spacing_multiplier(self):
+        """Per-language line spacing tightens/widens multi-line cues;
+        it floors at glyph height and NEVER eats the furigana reserve."""
+        with tempfile.TemporaryDirectory() as td:
+            def make(name, body):
+                p = os.path.join(td, name)
+                with open(p, 'w', encoding='utf-8') as f:
+                    f.write('WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n'
+                            + body + '\n')
+                d = load_subtitle(p)
+                d.language = 'ja'
+                for c in d.cues:
+                    c.lang = 'ja'
+                return d
+
+            ruby_doc = make('r.ja.vtt', 'こんにちは世界\n東京(とうきょう)へ行く')
+            plain_doc = make('p.ja.vtt', 'こんにちは世界\n東京へ行く')
+            canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+
+            def height(doc, spacing):
+                ov = OverrideSet()
+                ov.by_lang[''].line_spacing = spacing
+                rc = CueRenderer(doc, canvas, ov).render_cue(doc.cues[0])
+                return rc.height
+
+            # multiplier works both ways
+            self.assertLess(height(plain_doc, 0.8),
+                            height(plain_doc, 1.0))
+            self.assertLess(height(plain_doc, 1.0),
+                            height(plain_doc, 1.4))
+            # floor: below glyph height nothing shrinks further
+            self.assertEqual(height(plain_doc, 0.05),
+                             height(plain_doc, 0.2))
+            # furigana reserve survives maximum tightening: the ruby
+            # version stays taller than the identical plain text
+            self.assertGreater(height(ruby_doc, 0.5),
+                               height(plain_doc, 0.5) + 8)
+
     def test_region_overlay_boxes(self):
         try:
             from ttml2pgs.ui.widgets.preview import compute_region_boxes

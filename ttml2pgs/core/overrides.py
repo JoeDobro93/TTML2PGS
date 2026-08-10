@@ -61,6 +61,12 @@ class StyleOverrides:
     override_line_height: bool = False
     line_height: Dim = field(default_factory=lambda: Dim(1.25, ''))
 
+    #: multiplies the effective line height (1 = as authored/default).
+    #: Tighten or widen the gap between a cue's lines — the layout
+    #: floors at glyph height and always reserves furigana space
+    #: outside it, so ruby can never overlap the previous line.
+    line_spacing: float = 1.0
+
     #: safe-area padding (per language — Japanese vertical text may want
     #: different insets than Latin dialogue). Total percent per axis,
     #: split between the two edges. Moves region anchoring inward only;

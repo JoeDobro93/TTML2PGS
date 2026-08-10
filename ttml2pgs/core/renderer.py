@@ -353,16 +353,22 @@ class CueRenderer:
 
     def _line_height(self, para: 'ParaStyle', so: StyleOverrides
                      ) -> Tuple[Optional[float], float]:
+        # `line_spacing` multiplies whatever line height applies. The
+        # layout floors at glyph height (leading >= 0 horizontal;
+        # pitch >= asc+desc vertical) and ruby reserve is ALWAYS added
+        # outside the line height, so tightening can never make lines —
+        # or furigana — overlap.
+        mult = so.line_spacing if so.line_spacing > 0 else 1.0
         lh = para.line_height
         if so.override_line_height:
             lh = so.line_height
         if lh is None:
-            return None, 1.25
+            return None, 1.25 * mult
         if lh.unit == '':
-            return None, max(0.5, lh.value)
+            return None, max(0.5, lh.value) * mult
         ctx = self.unit_ctx(para.base_font_px)
         px = ctx.resolve(lh, axis='y', percent_of='font')
-        return (px, 1.25) if px else (None, 1.25)
+        return (px * mult, 1.25 * mult) if px else (None, 1.25 * mult)
 
     # ------------------------------------------------------------------ #
     def _apply_region_background(self, reg_spec: Style, rect: dict,
