@@ -177,6 +177,46 @@ class TestParsers(unittest.TestCase):
         rids = {c.region_id for c in doc.cues}
         self.assertEqual(len(rids), 2)     # 90% shared, 10% separate
 
+    def test_vtt_whole_cue_class_promotes_to_cue_style(self):
+        """A class span wrapping the ENTIRE payload becomes the cue's
+        own style (like TTML's <p style="…">); only the outermost one
+        promotes, partial spans and b/i/u wrappers stay in place."""
+        text = ('WEBVTT\n\n'
+                'STYLE\n::cue(.s1) {\n  color: yellow;\n}\n\n'
+                'STYLE\n::cue(.s2) {\n  color: lime;\n}\n\n'
+                '00:00.000 --> 00:01.000\n'
+                '<c.s1>Whole line</c>\n\n'
+                '00:02.000 --> 00:03.000\n'
+                'Partial <c.s1>span</c> here\n\n'
+                '00:04.000 --> 00:05.000\n'
+                '<c.s1>Outer <c.s2>inner</c></c>\n\n'
+                '00:06.000 --> 00:07.000\n'
+                '<b>Bold only</b>\n')
+        doc = VTTParser().parse_string(text)
+        whole, partial, nested, bold = doc.cues
+
+        self.assertEqual(whole.style_refs, ['s1'])
+        self.assertFalse([n for n in whole.root.children
+                          if n.kind == 'span'])      # spliced away
+        self.assertEqual(whole.plain_text(), 'Whole line')
+
+        self.assertEqual(partial.style_refs, [])
+        self.assertTrue([n for n in partial.root.children
+                         if n.kind == 'span' and 's1' in n.style_refs])
+
+        # outermost promotes, the inner span keeps its own ref
+        self.assertEqual(nested.style_refs, ['s1'])
+        inner = [n for n in nested.root.children
+                 if n.kind == 'span' and 's2' in n.style_refs]
+        self.assertTrue(inner)
+        self.assertEqual(nested.plain_text(), 'Outer inner')
+
+        # b/i/u pseudo wrappers never promote
+        self.assertEqual(bold.style_refs, [])
+        bspan = [n for n in bold.root.children if n.kind == 'span']
+        self.assertTrue(bspan and bspan[0].inline_style and
+                        bspan[0].inline_style.font_weight == 'bold')
+
     def test_srt(self):
         doc = load_subtitle(sample('basic.srt'))
         self.assertEqual(len(doc.cues), 4)
@@ -858,18 +898,40 @@ class TestExportFidelity(unittest.TestCase):
         self.assertIn('color: #ffee8c;', vtt)
         self.assertIn('font-size: 2.75vh;', vtt)
         self.assertIn('<c.lang-en>', vtt)
-        # the reparsed VTT resolves the en cue to the override color
+        # the reparsed VTT resolves the en cue to the override color —
+        # the whole-payload class wrapper promotes to the cue's style
         doc2 = VTTParser().parse_string(vtt)
         en_cue = next(c for c in doc2.cues if 'Hello' in c.plain_text())
-        span = next(ch for ch in en_cue.root.children
-                    if ch.kind == 'span')
+        self.assertIn('lang-en', en_cue.style_refs)
         computed = doc2.resolve_style(
-            [(en_cue.style_refs, en_cue.inline_style),
-             (span.style_refs, span.inline_style)], None)
+            [(en_cue.style_refs, en_cue.inline_style)], None)
         self.assertEqual(computed.color, (255, 238, 140, 255))
 
         srt = export_srt(doc, overrides=ov, is_hdr=False)
         self.assertIn('<font color="#ffee8c">Hello.</font>', srt)
+
+    def test_vtt_export_shear_becomes_italic(self):
+        """tts:shear has no VTT expression — skewed text exports as
+        italics: named styles via their ::cue block, inline via <i>."""
+        doc = self._band_doc()
+        doc.styles['sk'] = Style(shear=15.0)
+        doc.cues[0].style_refs = ['sk']              # named, on the cue
+        doc.cues[1].inline_style = Style(shear=10.0)  # inline, on the cue
+        sp = SpanNode(kind='span')                   # inline, on a span
+        sp.inline_style = Style(shear=12.0)
+        sp.children.append(SpanNode.text_node(' slanted'))
+        doc.cues[1].root.children.append(sp)
+        vtt = export_vtt(doc)
+        blk = vtt.split('::cue(.sk) {', 1)[1].split('}', 1)[0]
+        self.assertIn('font-style: italic;', blk)
+        payload = next(l for l in vtt.splitlines() if 'Hello.' in l)
+        self.assertTrue(payload.startswith('<i>') and
+                        payload.endswith('</i>'))
+        self.assertIn('<i> slanted</i>', payload)
+        # an explicitly upright style must NOT turn italic
+        doc.styles['sk'].font_style = 'normal'
+        blk2 = export_vtt(doc).split('::cue(.sk) {', 1)[1].split('}', 1)[0]
+        self.assertNotIn('italic', blk2)
 
     def test_vtt_roundtrip_keeps_stacked_bands_separate(self):
         """Exported VTT re-imported must keep the stacked ja/en bands
@@ -931,6 +993,86 @@ class TestExportFidelity(unittest.TestCase):
         self.assertIsNone(pane.stage.scene)
         self.assertFalse(pane.chk_player.isChecked())
         pane.worker_thread.quit() if hasattr(pane, 'worker_thread') else None
+
+    def test_cue_pane_dropdown_delegates_and_uid_select(self):
+        """Round 23: Region AND Style cells are dropdown pickers, and
+        select_cue_uid restores the remembered per-file position."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.cue_table import (
+            COL_REGION, COL_STYLE, CuePane, RegionDelegate, StyleDelegate)
+        doc = self._band_doc()
+        doc.styles['s1'] = Style(color=(255, 0, 0, 255))
+        pane = CuePane()
+        pane.set_document(doc)
+
+        sd = pane.table.itemDelegateForColumn(COL_STYLE)
+        rd = pane.table.itemDelegateForColumn(COL_REGION)
+        self.assertIsInstance(sd, StyleDelegate)
+        self.assertIsInstance(rd, RegionDelegate)
+        self.assertIn('default', sd._items())
+        self.assertIn('s1', sd._items())
+        self.assertIn('(default)', rd._items())
+        self.assertIn('横下', rd._items())
+
+        # the editor is a list picker that writes refs back via setData
+        idx = pane.proxy.index(0, COL_STYLE)
+        combo = sd.createEditor(pane.table, None, idx)
+        sd.setEditorData(combo, idx)
+        self.assertEqual(combo.currentText(), 'default')
+        combo.setCurrentText('s1')
+        sd.setModelData(combo, pane.proxy, idx)
+        first = pane.model.cue_at(
+            pane.proxy.mapToSource(idx).row())
+        self.assertEqual(first.style_refs, ['s1'])
+        app.processEvents()            # flush the deferred showPopup
+        combo.hidePopup()
+        combo.deleteLater()
+
+        # per-file position memory: select by uid, scrolls + selects
+        target = doc.cues[1]
+        self.assertTrue(pane.select_cue_uid(target.uid))
+        self.assertEqual(pane.selected_cues(), [target])
+        self.assertFalse(pane.select_cue_uid(10 ** 9))
+
+        from ttml2pgs.ui.state import DocumentSession
+        sess = DocumentSession(doc=doc, sub_path='x.vtt')
+        self.assertIsNone(sess.last_cue_uid)   # field exists, unset
+        sess.last_cue_uid = target.uid
+        self.assertEqual(sess.last_cue_uid, target.uid)
+
+    def test_close_popout_before_dialogs(self):
+        """Round 23: any dialog first closes the (stay-on-top) pop-out
+        so it can't sit in front of / block the new window."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.preview import PreviewPane
+        pane = PreviewPane()
+        pane.close_popout()                    # no-op when closed
+        self.assertIsNone(pane.popout)
+        pane._toggle_popout()
+        self.assertIsNotNone(pane.popout)
+        pane.close_popout()                    # closed signal clears it
+        self.assertIsNone(pane.popout)
+        # the sources/queue panes expose the hook the window wires up
+        from ttml2pgs.ui.widgets.queue_view import QueuePane
+        from ttml2pgs.ui.widgets.sources import SourcesPane
+        from ttml2pgs.core.jobqueue import QueueManager
+        from ttml2pgs.ui.state import AppState
+        q = QueueManager()                     # never started: no threads
+        self.assertTrue(callable(SourcesPane(AppState()).before_popup))
+        self.assertTrue(callable(QueuePane(q, app_settings={})
+                                 .before_popup))
 
     def test_region_hint_updates_on_edit(self):
         """Moving a region across the midline flips its position hint

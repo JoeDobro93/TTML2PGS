@@ -119,6 +119,10 @@ class MainWindow(QMainWindow):
         self.release_video_requested.connect(
             self.preview_pane.release_video,
             Qt.ConnectionType.QueuedConnection)
+        # any pane about to open a dialog first closes the pop-out
+        # preview so it can't sit in front of (or block) the new window
+        self.sources_pane.before_popup = self.preview_pane.close_popout
+        self.queue_pane.before_popup = self.preview_pane.close_popout
 
         self._build_menu()
 
@@ -190,6 +194,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ #
     def _show_preferences(self):
+        self.preview_pane.close_popout()
         if getattr(self, '_pref_dialog', None) is None:
             dlg = PreferencesDialog(self.state.overrides,
                                     self.state.settings, parent=self)
@@ -222,6 +227,8 @@ class MainWindow(QMainWindow):
         # a (disabled) override tab for every open language
         self.settings_pane.ensure_language_tabs(self.state.languages_open())
         self._push_preview_context(sess)
+        if sess.last_cue_uid is not None:
+            self.cue_pane.select_cue_uid(sess.last_cue_uid)
         self.setWindowTitle(
             f'TTML2PGS 2 — {sess.display_name}')
 
@@ -244,6 +251,8 @@ class MainWindow(QMainWindow):
 
     def _cue_selected_for_editor(self, cue):
         sess = self.state.active
+        if sess is not None and cue is not None:
+            sess.last_cue_uid = cue.uid  # restored on re-activation
         self.sel_cue_pane.set_cue(
             sess.doc if sess else None, cue,
             n_selected=max(1, len(self.cue_pane.selected_cues())))
@@ -413,6 +422,7 @@ class MainWindow(QMainWindow):
         sess = self.state.active
         if sess is None:
             return
+        self.preview_pane.close_popout()
         default = os.path.splitext(sess.sub_path)[0] + '.t2p'
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save project', default, 'TTML2PGS project (*.t2p)')
@@ -430,6 +440,7 @@ class MainWindow(QMainWindow):
         sess = self.state.active
         if sess is None:
             return
+        self.preview_pane.close_popout()
         ext = {'ttml': '.ttml', 'vtt': '.vtt', 'srt': '.srt'}[fmt]
         default = os.path.splitext(sess.sub_path)[0] + ext
         path, _ = QFileDialog.getSaveFileName(
@@ -455,6 +466,7 @@ class MainWindow(QMainWindow):
 
     def _about(self):
         from .. import __version__
+        self.preview_pane.close_popout()
         QMessageBox.about(
             self, 'TTML2PGS',
             f'<b>TTML2PGS {__version__}</b><br>'
@@ -470,6 +482,7 @@ class MainWindow(QMainWindow):
         if dirty and not self.queue.is_idle():
             pass  # queue keeps its own persistent state
         if dirty:
+            self.preview_pane.close_popout()
             names = '\n'.join(f'• {s.display_name}' for s in dirty[:8])
             r = QMessageBox.question(
                 self, 'Unsaved changes',

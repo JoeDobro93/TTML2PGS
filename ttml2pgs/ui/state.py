@@ -44,6 +44,8 @@ class DocumentSession:
     merged_from: List[str] = field(default_factory=list)
     #: mux track metadata name ('' = none; merged pairs get 'ja-en')
     track_name: str = ''
+    #: uid of the last selected cue, restored when switching back
+    last_cue_uid: Optional[int] = None
 
     # ------------------------------------------------------------------ #
     @property

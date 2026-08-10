@@ -164,6 +164,9 @@ class SourcesPane(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
+        #: called before any dialog opens (main window points this at
+        #: PreviewPane.close_popout so the pop-out can't block dialogs)
+        self.before_popup = lambda: None
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
 
@@ -328,6 +331,7 @@ class SourcesPane(QWidget):
 
     # ------------------------------------------------------------------ #
     def _add_files(self):
+        self.before_popup()
         exts = ' '.join(f'*{e}' for e in SUBTITLE_EXTENSIONS) + ' *.t2p'
         paths, _ = QFileDialog.getOpenFileNames(
             self, 'Open subtitles', '', f'Subtitles ({exts})')
@@ -336,6 +340,7 @@ class SourcesPane(QWidget):
             self._open(p, batch)
 
     def _add_folder(self):
+        self.before_popup()
         folder = QFileDialog.getExistingDirectory(self, 'Add folder')
         if not folder:
             return
@@ -346,6 +351,7 @@ class SourcesPane(QWidget):
 
     def _open(self, path: str, batch: Optional[dict] = None):
         from PyQt6.QtWidgets import QCheckBox, QMessageBox
+        self.before_popup()  # reopen/overrides prompts may appear
         # same FILE NAME already open (any folder)? confirm a reload
         # instead of loading it twice
         idx = self.state.find_session_by_name(path)
@@ -413,6 +419,7 @@ class SourcesPane(QWidget):
             self.overrides_loaded.emit(ov)
 
     def _add_external_sup(self):
+        self.before_popup()
         sup, _ = QFileDialog.getOpenFileName(
             self, 'Pick a .sup to queue for muxing', '', 'PGS (*.sup)')
         if not sup:
@@ -428,6 +435,7 @@ class SourcesPane(QWidget):
         rows = self._selected_rows()
         if not rows:
             return
+        self.before_popup()
         if len(rows) > 1:
             from PyQt6.QtWidgets import QMessageBox
             if QMessageBox.question(
@@ -445,6 +453,7 @@ class SourcesPane(QWidget):
         n = len(self.state.sessions)
         if not n:
             return
+        self.before_popup()
         if QMessageBox.question(
                 self, 'Close all',
                 f'Close all {n} subtitle(s)?') != \
@@ -464,6 +473,7 @@ class SourcesPane(QWidget):
     # ------------------------------------------------------------------ #
     def _merge_selected(self):
         from PyQt6.QtWidgets import QMessageBox
+        self.before_popup()
         rows = self._selected_rows()
         sel = [self.state.sessions[r] for r in rows
                if not self.state.sessions[r].merged_from]
@@ -555,6 +565,7 @@ class SourcesPane(QWidget):
 
     def _cell_double(self, row, col):
         if col == COL_VIDEO and 0 <= row < len(self.state.sessions):
+            self.before_popup()
             path, _ = QFileDialog.getOpenFileName(
                 self, 'Bind video', '',
                 'Video (*.mkv *.mp4 *.m4v *.mov *.ts *.m2ts *.avi *.webm)')

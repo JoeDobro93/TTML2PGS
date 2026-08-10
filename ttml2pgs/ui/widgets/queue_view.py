@@ -136,6 +136,9 @@ class QueuePane(QWidget):
         super().__init__()
         self.queue = queue
         self.app_settings = app_settings
+        #: called before any dialog opens (main window points this at
+        #: PreviewPane.close_popout so the pop-out can't block dialogs)
+        self.before_popup = lambda: None
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 4, 4, 4)
@@ -361,6 +364,7 @@ class QueuePane(QWidget):
         groups = self.queue.snapshot()
         if not groups:
             return
+        self.before_popup()
         if QMessageBox.question(
                 self, 'Clear queue',
                 f'Remove all {len(groups)} video group(s) from the '
@@ -394,6 +398,7 @@ class QueuePane(QWidget):
         job = self.queue.find_job(job_id)
         if job is None:
             return
+        self.before_popup()
         name, ok = QInputDialog.getText(
             self, 'Mux track name',
             'Track name written into the MKV for this subtitle\n'

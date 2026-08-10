@@ -434,7 +434,7 @@ def _emit_vtt_node(node: SpanNode, doc: SubtitleDocument, out: List[str]):
                 out.append('</ruby>')
                 continue
             tags: List[str] = []
-            if spec.font_style in ('italic', 'oblique'):
+            if spec.font_style in ('italic', 'oblique') or spec.shear:
                 tags.append('i')
             if spec.font_weight == 'bold':
                 tags.append('b')
@@ -489,6 +489,9 @@ def _style_decls(st: Style, sizes: bool = True) -> List[str]:
         decls.append(f"font-family: {', '.join(st.font_family)};")
     if st.font_style:
         decls.append(f"font-style: {st.font_style};")
+    elif st.shear:
+        # VTT/CSS can't express tts:shear — fall back to italic
+        decls.append("font-style: italic;")
     if st.font_weight:
         decls.append(f"font-weight: {st.font_weight};")
     if sizes and st.font_size is not None:
@@ -545,11 +548,19 @@ def export_vtt(doc: SubtitleDocument, overrides=None,
         for r in cue.style_refs:
             if not r.startswith('__'):
                 cls += [p for p in r.split('.') if p]
+        # cue inline shear has no ::cue class to carry it — emit <i>
+        ist = cue.inline_style
+        italic = bool(ist is not None and ist.shear
+                      and ist.font_style not in ('italic', 'oblique'))
+        if italic:
+            buf.append('<i>')
         if cls:
             buf.append('<c.' + '.'.join(dict.fromkeys(cls)) + '>')
         _emit_vtt_node(cue.root, doc, buf)
         if cls:
             buf.append('</c>')
+        if italic:
+            buf.append('</i>')
         lines.append(''.join(buf).strip('\n'))
         lines.append('')
     return '\n'.join(lines)

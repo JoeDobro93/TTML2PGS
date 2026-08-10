@@ -319,7 +319,38 @@ class VTTParser:
         self._parse_payload(payload, cue.root, doc)
         if not cue.root.children:
             return
+        self._promote_cue_style(cue)
         doc.cues.append(cue)
+
+    @staticmethod
+    def _promote_cue_style(cue: Cue):
+        """A class tag wrapping the ENTIRE payload becomes the cue's
+        style (like TTML's <p style="…">): the outermost span's refs
+        hoist to cue level and its children splice up. Inner spans stay
+        span-level. Only named classes promote — b/i/u pseudo styles
+        keep their inline placement."""
+        kids = cue.root.children
+        core = [c for c in kids
+                if not (c.kind == 'text' and not c.text.strip())]
+        if len(core) != 1 or core[0].kind != 'span':
+            return
+        span = core[0]
+        if not span.style_refs or \
+                not any(not r.startswith('__') for r in span.style_refs):
+            return
+        cue.style_refs = list(dict.fromkeys(
+            cue.style_refs + span.style_refs))
+        if span.inline_style is not None:
+            cue.inline_style = (
+                span.inline_style.merged_over(cue.inline_style)
+                if cue.inline_style is not None else span.inline_style)
+        new_kids = []
+        for c in kids:
+            if c is span:
+                new_kids.extend(span.children)
+            else:
+                new_kids.append(c)
+        cue.root.children = new_kids
 
     def _parse_cue_settings(self, text: str) -> Dict[str, str]:
         out: Dict[str, str] = {}

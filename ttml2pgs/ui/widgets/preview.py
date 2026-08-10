@@ -1309,6 +1309,15 @@ class PreviewPane(QWidget):
             return self.stage.scene.canvas_w, self.stage.scene.canvas_h
         return self.player_view._canvas
 
+    def close_popout(self):
+        """Close the pop-out (if open) so dialogs aren't blocked by it.
+
+        Called before any other window/dialog opens; the closed signal
+        reclaims a popped-out player automatically.
+        """
+        if self.popout is not None:
+            self.popout.close()
+
     def _toggle_popout(self):
         if self.popout is None:
             self.popout = PopOutWindow()

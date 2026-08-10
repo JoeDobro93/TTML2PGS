@@ -234,7 +234,8 @@ class CueModel(QAbstractTableModel):
             if cue.inline_style is not None:
                 bits.append('✎ has inline <p> style overrides — edit in '
                             'the Selected cue pane')
-            bits.append('Edit: space-separated style ids, or "default".')
+            bits.append('Click to pick a style; combine several in the '
+                        'Selected cue pane.')
             return '\n'.join(bits)
         if role == Qt.ItemDataRole.ToolTipRole and c == COL_TEXT:
             return self.preview(cue)
@@ -335,49 +336,74 @@ def _set_plain_text(cue: Cue, text: str):
     cue.root = root
 
 
-class RegionDelegate(QStyledItemDelegate):
+class _ArrowComboDelegate(QStyledItemDelegate):
+    """Dropdown picker cells: a plain grey ▾ is ALWAYS visible on the
+    right (no button chrome), one click opens the list directly."""
+
     def __init__(self, model: CueModel, parent=None):
         super().__init__(parent)
         self._model = model
 
+    def _items(self) -> List[str]:                 # override
+        return []
+
+    def _fallback(self) -> str:                    # override
+        return ''
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        from PyQt6.QtGui import QColor
+        painter.save()
+        painter.setPen(QColor(150, 150, 150))
+        r = option.rect.adjusted(0, 0, -4, 0)
+        painter.drawText(r, int(Qt.AlignmentFlag.AlignRight |
+                                Qt.AlignmentFlag.AlignVCenter), '▾')
+        painter.restore()
+
     def createEditor(self, parent, option, index):
+        from PyQt6.QtCore import QTimer
         combo = QComboBox(parent)
-        combo.addItem('(default)')
-        if self._model.doc:
-            combo.addItems(list(self._model.doc.regions.keys()))
+        combo.addItems(self._items())
+        combo.activated.connect(
+            lambda *_: self.commitData.emit(combo) or
+            self.closeEditor.emit(combo))
+        QTimer.singleShot(0, combo.showPopup)      # open the list at once
         return combo
 
     def setEditorData(self, editor, index):
         editor.setCurrentText(index.data(Qt.ItemDataRole.EditRole)
-                              or '(default)')
+                              or self._fallback())
 
     def setModelData(self, editor, model, index):
         model.setData(index, editor.currentText(),
                       Qt.ItemDataRole.EditRole)
 
 
-class StyleDelegate(QStyledItemDelegate):
-    """Editable combo: pick one named style or type several ids."""
-
-    def __init__(self, model: CueModel, parent=None):
-        super().__init__(parent)
-        self._model = model
-
-    def createEditor(self, parent, option, index):
-        combo = QComboBox(parent)
-        combo.setEditable(True)
-        combo.addItem('default')
+class RegionDelegate(_ArrowComboDelegate):
+    def _items(self):
+        items = ['(default)']
         if self._model.doc:
-            combo.addItems(sorted(self._model.doc.styles.keys()))
-        return combo
+            items += [r for r in self._model.doc.regions.keys()
+                      if not r.startswith('__')]
+        return items
 
-    def setEditorData(self, editor, index):
-        editor.setCurrentText(index.data(Qt.ItemDataRole.EditRole)
-                              or 'default')
+    def _fallback(self):
+        return '(default)'
 
-    def setModelData(self, editor, model, index):
-        model.setData(index, editor.currentText(),
-                      Qt.ItemDataRole.EditRole)
+
+class StyleDelegate(_ArrowComboDelegate):
+    """Dropdown of named styles (multi-ref editing lives in the
+    Selected-cue pane)."""
+
+    def _items(self):
+        items = ['default']
+        if self._model.doc:
+            items += [s for s in sorted(self._model.doc.styles.keys())
+                      if not s.startswith('__')]
+        return items
+
+    def _fallback(self):
+        return 'default'
 
 
 class CueFilterProxy(QSortFilterProxyModel):
@@ -796,7 +822,18 @@ class CuePane(QWidget):
             src = self.proxy.mapToSource(self.proxy.index(row, 0))
             if self.model.cue_at(src.row()) is cue:
                 self.table.selectRow(row)
+                self.table.scrollTo(self.proxy.index(row, 0))
                 return
+
+    def select_cue_uid(self, uid: int) -> bool:
+        for row in range(self.proxy.rowCount()):
+            src = self.proxy.mapToSource(self.proxy.index(row, 0))
+            c = self.model.cue_at(src.row())
+            if c is not None and c.uid == uid:
+                self.table.selectRow(row)
+                self.table.scrollTo(self.proxy.index(row, 0))
+                return True
+        return False
 
     # ------------------------------------------------------------------ #
     def add_cue(self):
