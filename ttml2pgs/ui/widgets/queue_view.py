@@ -607,9 +607,46 @@ class QueuePane(QWidget):
         menu.addAction('Pause selected', self._pause_selected)
         menu.addAction('Resume/Retry selected', self._retry_resume_selected)
         menu.addAction('Cancel selected', self._cancel_selected)
+        gids = self._selected_group_ids()
+        if gids:
+            menu.addSeparator()
+            gl = f'{len(gids)} video{"s" if len(gids) != 1 else ""}'
+            m_mux = menu.addMenu(f'Mux settings ({gl})')
+            m_mux.addAction('Mux into video: ON',
+                            lambda: self._set_mux_selected(True))
+            m_mux.addAction('Mux into video: OFF',
+                            lambda: self._set_mux_selected(False))
+            m_mux.addSeparator()
+            m_mux.addAction('Replace original video: ON',
+                            lambda: self._set_replace_selected(True))
+            m_mux.addAction('Replace original video: OFF '
+                            '(write *.muxed.mkv)',
+                            lambda: self._set_replace_selected(False))
         menu.addSeparator()
         menu.addAction(f'Remove selected ({label})\tDel',
                        self._remove_selected)
+
+    def _selected_group_ids(self) -> List[int]:
+        """Groups touched by the selection: selected group rows plus the
+        parent groups of any selected jobs."""
+        sel = self._selection()
+        gids = {ident for kind, ident in sel if kind == 'group'}
+        jids = {ident for kind, ident in sel if kind == 'job'}
+        if jids:
+            for g in self.queue.snapshot():
+                if any(j.id in jids for j in g.render_jobs):
+                    gids.add(g.id)
+        return sorted(gids)
+
+    def _set_mux_selected(self, on: bool):
+        for gid in self._selected_group_ids():
+            self.queue.set_group_mux(gid, on)
+        self.refresh()
+
+    def _set_replace_selected(self, on: bool):
+        for gid in self._selected_group_ids():
+            self.queue.set_group_replace(gid, on)
+        self.refresh()
 
     def _retry_resume_selected(self):
         for jid in self._selected_job_ids():

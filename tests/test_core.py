@@ -1472,6 +1472,72 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(q2.groups[0].render_jobs[0].track_name,
                              'ja-en')
 
+    def test_bulk_mux_toggles_in_queue_pane(self):
+        """Round 28: the multi-select context menu's mux settings apply
+        to every selected group AND the parent groups of selected
+        jobs."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.queue_view import QueuePane
+        from ttml2pgs.core.jobqueue import QueueManager
+
+        with tempfile.TemporaryDirectory() as td:
+            v1 = os.path.join(td, 'ep1.mkv')
+            v2 = os.path.join(td, 'ep2.mkv')
+            for v in (v1, v2):
+                open(v, 'wb').write(b'x')
+            q = QueueManager()                 # never started: no threads
+            doc = load_subtitle(sample('basic.srt'))
+            q.add_render(doc, 'a.srt',
+                         RenderSettings(out_path=os.path.join(
+                             td, 'ep1.en.sup')),
+                         OverrideSet(), video_path=v1, lang='en')
+            q.add_render(doc, 'b.srt',
+                         RenderSettings(out_path=os.path.join(
+                             td, 'ep2.en.sup')),
+                         OverrideSet(), video_path=v2, lang='en')
+            pane = QueuePane(q, app_settings={})
+            pane.refresh()
+            g1, g2 = q.snapshot()
+            self.assertTrue(g1.mux_enabled and g2.mux_enabled)
+
+            def select(kinds):
+                pane.tree.clearSelection()
+                for i in range(pane.tree.topLevelItemCount()):
+                    it = pane.tree.topLevelItem(i)
+                    gid = it.data(0, Qt.ItemDataRole.UserRole)
+                    if ('group', gid) in kinds:
+                        it.setSelected(True)
+                    for c in range(it.childCount()):
+                        ch = it.child(c)
+                        jid = ch.data(0, Qt.ItemDataRole.UserRole)
+                        if ('job', jid) in kinds:
+                            ch.setSelected(True)
+
+            # both group rows selected → both toggle off
+            select({('group', g1.id), ('group', g2.id)})
+            self.assertEqual(pane._selected_group_ids(),
+                             sorted([g1.id, g2.id]))
+            pane._set_mux_selected(False)
+            self.assertFalse(g1.mux_enabled or g2.mux_enabled)
+            pane._set_mux_selected(True)
+
+            # a JOB row of group 1 + the group row of group 2 → both
+            jid = g1.render_jobs[0].id
+            select({('job', jid), ('group', g2.id)})
+            self.assertEqual(pane._selected_group_ids(),
+                             sorted([g1.id, g2.id]))
+            pane._set_replace_selected(False)
+            self.assertFalse(g1.replace_original or g2.replace_original)
+            pane._set_replace_selected(True)
+            self.assertTrue(g1.replace_original and g2.replace_original)
+
     def test_failed_mux_runs_once_and_others_proceed(self):
         """Batch regression: a failing mux must go FAILED after ONE
         attempt (no instant re-pick loop) and must not starve the other
