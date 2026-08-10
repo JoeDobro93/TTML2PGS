@@ -3039,6 +3039,78 @@ class TestMergeMode(unittest.TestCase):
             self.assertEqual(
                 snap_secondary_timestamps(m2, 'ja', 500.0), 0)
 
+    def test_snap_prefers_overlap_partner(self):
+        """A secondary edge that already sits ON a primary boundary must
+        still join the cue it actually OVERLAPS (For All Mankind case:
+        en 4:39.780→4:44.034 with ja 4:38.654→4:39.780 + 4:39.905→
+        4:44.034 — the en start coincides with the first ja cue's END,
+        but its partner is the second ja cue → start snaps to 39.905)."""
+        from ttml2pgs.core.merge import snap_secondary_timestamps
+
+        def make(cues):
+            doc = SubtitleDocument()
+            doc.language = 'ja'
+            out = []
+            for b, e, lang in cues:
+                c = Cue(begin_ms=b, end_ms=e)
+                c.lang = lang
+                c.root.children.append(SpanNode.text_node('x'))
+                doc.cues.append(c)
+                out.append(c)
+            return doc, out
+
+        doc, (_, _, en) = make([
+            (278654, 279780, 'ja'),
+            (279905, 284034, 'ja'),
+            (279780, 284034, 'en'),
+        ])
+        self.assertEqual(snap_secondary_timestamps(doc, 'ja', 700.0), 1)
+        self.assertEqual((en.begin_ms, en.end_ms), (279905.0, 284034.0))
+
+        # without any overlap there's no partner — plain nearest-boundary
+        doc2, (_, en2) = make([
+            (291200, 292000, 'ja'),
+            (290000, 291000, 'en'),
+        ])
+        self.assertEqual(snap_secondary_timestamps(doc2, 'ja', 700.0), 1)
+        self.assertEqual((en2.begin_ms, en2.end_ms), (290000.0, 291200.0))
+
+    def test_filename_elision_keeps_extension(self):
+        """Round 27: narrow file-name columns elide by CHARACTER and
+        keep the whole extension chain — never word-wrap hiding."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtGui import QFont, QFontMetrics
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.elide import elide_filename
+
+        fm = QFontMetrics(QFont())
+        name = 'For_All_Mankind_S02E04_Pathfinder.en.forced.vtt'
+        # fits → untouched
+        self.assertEqual(
+            elide_filename(fm, name, fm.horizontalAdvance(name)), name)
+        # ~20-character column: head elides, extension chain intact
+        w = fm.horizontalAdvance('o' * 20)
+        out = elide_filename(fm, name, w)
+        self.assertTrue(out.endswith('.en.forced.vtt'), out)
+        self.assertIn('…', out)
+        self.assertTrue(out.startswith('For_All'), out)
+        self.assertLessEqual(fm.horizontalAdvance(out), w)
+        # merged display names keep the LAST file's extension chain
+        merged = 'Ep01.ja.vtt | Ep01.en.forced.vtt'
+        out2 = elide_filename(fm, merged,
+                              fm.horizontalAdvance('o' * 20))
+        self.assertTrue(out2.endswith('.en.forced.vtt'), out2)
+        # too narrow even for the chain → plain elision, still fits
+        tiny = fm.horizontalAdvance('o' * 6)
+        out3 = elide_filename(fm, name, tiny)
+        self.assertIn('…', out3)
+        self.assertLessEqual(fm.horizontalAdvance(out3), tiny)
+
     def test_reopen_by_name(self):
         """Same FILE NAME (any folder) can't be open twice — the state
         finds it and reload replaces in place."""

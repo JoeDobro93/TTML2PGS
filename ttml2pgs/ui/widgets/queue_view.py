@@ -203,6 +203,11 @@ class QueuePane(QWidget):
         self.tree.setColumnWidth(0, 230)
         self.tree.setColumnWidth(1, 110)
         self.tree.setColumnWidth(2, 80)
+        # file names elide keeping the extension chain; ~20-char floor
+        from .elide import (FileElideDelegate, enforce_min_section_width,
+                            min_chars_width)
+        self.tree.setItemDelegateForColumn(0, FileElideDelegate(self.tree))
+        enforce_min_section_width(hh, (0,), min_chars_width(self.tree))
         self.tree.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

@@ -226,11 +226,30 @@ def _nearest_bound(t: float, bounds, threshold_ms: float
     return best
 
 
-def _snap_cue(cue, bounds, threshold_ms: float) -> bool:
+def _overlap_partner(cue, refs):
+    """The reference cue sharing the most display time with `cue`."""
+    best, ov = None, 0.0
+    for p in refs:
+        o = min(cue.end_ms, p.end_ms) - max(cue.begin_ms, p.begin_ms)
+        if o > ov:
+            best, ov = p, o
+    return best
+
+
+def _snap_cue(cue, bounds, threshold_ms: float, prefer=None) -> bool:
     """Move each endpoint to the nearest boundary in range; skip moves
-    that would invert or zero the cue. True if anything changed."""
-    nb = _nearest_bound(cue.begin_ms, bounds, threshold_ms)
-    ne = _nearest_bound(cue.end_ms, bounds, threshold_ms)
+    that would invert or zero the cue. True if anything changed.
+
+    `prefer` is the (begin, end) of the cue's PARTNER — the reference
+    cue it overlaps the most. A partner edge within the threshold wins
+    over the merely-nearest boundary: a cue whose start happens to
+    coincide with the END of the *previous* reference cue must still
+    move to the start of the cue it actually displays with."""
+    pb, pe = prefer if prefer is not None else (None, None)
+    nb = (pb if pb is not None and abs(pb - cue.begin_ms) <= threshold_ms
+          else _nearest_bound(cue.begin_ms, bounds, threshold_ms))
+    ne = (pe if pe is not None and abs(pe - cue.end_ms) <= threshold_ms
+          else _nearest_bound(cue.end_ms, bounds, threshold_ms))
     new_b = nb if nb is not None else cue.begin_ms
     new_e = ne if ne is not None else cue.end_ms
     if new_e <= new_b:                   # would invert/zero — best effort
@@ -275,7 +294,11 @@ def snap_secondary_timestamps(doc: SubtitleDocument,
         touches = any(cue.begin_ms < p.end_ms + threshold_ms and
                       p.begin_ms - threshold_ms < cue.end_ms
                       for p in prim)
-        if touches and _snap_cue(cue, bounds, threshold_ms):
+        if not touches:
+            continue
+        partner = _overlap_partner(cue, prim)
+        prefer = (partner.begin_ms, partner.end_ms) if partner else None
+        if _snap_cue(cue, bounds, threshold_ms, prefer):
             changed += 1
     return changed
 
@@ -317,7 +340,9 @@ def align_same_language_overlaps(doc: SubtitleDocument,
                 continue
             bounds = sorted({t for o in refs
                              for t in (o.begin_ms, o.end_ms)})
-            if _snap_cue(cue, bounds, threshold_ms):
+            partner = _overlap_partner(cue, refs)
+            prefer = (partner.begin_ms, partner.end_ms) if partner else None
+            if _snap_cue(cue, bounds, threshold_ms, prefer):
                 changed += 1
     return changed
 

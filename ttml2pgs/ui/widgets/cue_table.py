@@ -523,6 +523,7 @@ class CuePane(QWidget):
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
             QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.table.setWordWrap(False)      # elide by character, not word
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(22)
         hh = self.table.horizontalHeader()

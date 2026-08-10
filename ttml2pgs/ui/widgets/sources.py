@@ -229,6 +229,21 @@ class SourcesPane(QWidget):
                      (COL_SRC_FPS, 64), (COL_TGT_FPS, 64),
                      (COL_CONFORM, 120), (COL_OFFSET, 70)):
             self.table.setColumnWidth(c, w)
+        # file-name cells: character-level elision that keeps the
+        # extension chain visible (word wrap would hide at spaces), and
+        # a ~20-character floor on how narrow the columns can get
+        from .elide import (FileElideDelegate, enforce_min_section_width,
+                            min_chars_width)
+        self.table.setWordWrap(False)
+        name_cols = (COL_NAME, COL_VIDEO, COL_OUT)
+        for c in name_cols:
+            self.table.setItemDelegateForColumn(
+                c, FileElideDelegate(self.table))
+        min_w = min_chars_width(self.table)
+        for c in name_cols:
+            if self.table.columnWidth(c) < min_w:
+                self.table.setColumnWidth(c, min_w)
+        enforce_min_section_width(hh, name_cols, min_w)
         self.table.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         lay.addWidget(self.table)
