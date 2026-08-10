@@ -1334,6 +1334,32 @@ class TestPipelineAndQueue(unittest.TestCase):
         src = open(os.path.join(root, 'ttml2pgs', '__main__.py'),
                    encoding='utf-8').read()
         self.assertIn('freeze_support', src)
+        # IDE launches refresh the exe; the frozen exe must not
+        gui_src = open(os.path.join(root, 'run_gui.py'),
+                       encoding='utf-8').read()
+        self.assertIn('make_exe', gui_src)
+        self.assertIn('frozen', gui_src)
+
+    def test_make_exe_fingerprint(self):
+        """The auto-build stamp: stable across calls, changes when a
+        source file changes, restores when reverted."""
+        import importlib.util
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        spec = importlib.util.spec_from_file_location(
+            'make_exe', os.path.join(root, 'make_exe.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fp1 = mod.fingerprint()
+        self.assertEqual(fp1, mod.fingerprint())
+        target = os.path.join(root, 'ttml2pgs', '__init__.py')
+        st = os.stat(target)
+        try:
+            os.utime(target, ns=(st.st_atime_ns,
+                                 st.st_mtime_ns + 1_000_000))
+            self.assertNotEqual(fp1, mod.fingerprint())
+        finally:
+            os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(fp1, mod.fingerprint())
 
     def test_video_match_streaming_names(self):
         """v1 matched on the first dot-token; names like

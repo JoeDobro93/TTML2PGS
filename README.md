@@ -1,4 +1,4 @@
-# TTML2PGS 2
+# TTML2PGS 2.0
 
 Convert TTML / WebVTT / SRT subtitles to image-based PGS (`.sup`) tracks and
 remux them into your videos — with browser-quality CJK typography (ruby,
@@ -8,8 +8,7 @@ vertical text, proper Japanese-vs-Chinese glyphs) at native-code speed.
 HTML in headless Chrome and screenshotted it; v2 rasterizes glyphs directly
 with HarfBuzz + FreeType + NumPy. Same visual results (paint-order outlines,
 soft shadows, justified ruby), several times faster, no browser dependency,
-and far less RAM. The legacy app is still in `core/`, `ui/`, `main.py` for
-reference; the new app lives entirely in `ttml2pgs/`.
+and far less RAM. The app lives entirely in `ttml2pgs/`.
 
 ## Running
 
@@ -49,20 +48,26 @@ is already there). On Windows the shortcut targets `pythonw.exe`, so
 no console window appears; it carries the app icon and the right
 working directory. On Linux it installs a `.desktop` launcher.
 
-**B. Fully standalone build (no Python needed to run).** For when the
-app is in a good state and you want a self-contained folder you can
-keep outside the repo:
+**B. Standalone executable (no Python needed to run).**
 
 ```bash
 pip install pyinstaller
-pyinstaller ttml2pgs.spec
+python make_exe.py            # or: pyinstaller ttml2pgs.spec
 ```
 
 → `dist/TTML2PGS/TTML2PGS.exe` (windowed, icon included) — pin a
 shortcut to it anywhere. `ffmpeg`/`mkvmerge` are still found on PATH
 (or drop them next to the exe), and libmpv stays optional via
-Preferences → Player. Remember this snapshot doesn't update with the
-repo: rebuild after pulling changes.
+Preferences → Player.
+
+The exe keeps itself current automatically: every time you launch
+from source (`run_gui.py` — the IDE play button), a background build
+refreshes `dist/` **only if the source tree changed** (fingerprint
+check; unchanged sources cost nothing). The frozen executable itself
+never rebuilds anything. Build output lands in
+`build/auto_build.log`; a build attempted while the exe is running
+fails harmlessly and leaves the previous exe in place — it refreshes
+on your next IDE run.
 
 ## What v2 does
 

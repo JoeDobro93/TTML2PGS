@@ -434,12 +434,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, 'Export failed', str(e))
 
     def _about(self):
+        from .. import __version__
         QMessageBox.about(
-            self, 'TTML2PGS 2',
-            '<b>TTML2PGS 2</b><br>'
+            self, 'TTML2PGS',
+            f'<b>TTML2PGS {__version__}</b><br>'
             'Direct pixel renderer for TTML / WebVTT / SRT → PGS (.sup), '
             'with CJK-correct fonts, ruby, vertical text, per-language '
-            'overrides and a video-grouped render/mux queue.<br><br>'
+            'overrides, merge mode and a video-grouped render/mux '
+            'queue.<br><br>'
             'HarfBuzz + FreeType + NumPy — no browser involved.')
 
     # ------------------------------------------------------------------ #
