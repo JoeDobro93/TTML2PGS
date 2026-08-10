@@ -412,8 +412,10 @@ class QueuePane(QWidget):
 
     def queue_sup_files(self, paths) -> List[str]:
         """Match each .sup to a video next to it (same stem rules as
-        subtitles — language/flag/'ja+en' tokens ignored) and add it to
-        that video's mux group. Language, track label and forced flag
+        subtitles — language/flag/'ja+en' tokens ignored) and queue it
+        as a DONE render job, exactly as if its render had just
+        finished: it waits like any added work until you start it,
+        then the group muxes. Language, track label and forced flag
         come from the extension chain. Returns unmatched paths."""
         from ...core.video import find_matching_video, parse_sup_name
         unmatched: List[str] = []
@@ -423,7 +425,7 @@ class QueuePane(QWidget):
                 unmatched.append(p)
                 continue
             lang, track, _forced = parse_sup_name(p)
-            self.queue.add_external_sup(video, p, lang=lang,
+            self.queue.add_finished_sup(video, p, lang=lang,
                                         track_name=track)
         return unmatched
 

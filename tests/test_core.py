@@ -1532,8 +1532,11 @@ class TestPipelineAndQueue(unittest.TestCase):
                          'Show.S01E01')
 
     def test_queue_sup_files_matching(self):
-        """Round 29: batch .sup queueing matches videos by stem, groups
-        by video, parses names, dedupes re-adds and reports orphans."""
+        """Round 29: batch .sup queueing matches videos by stem and
+        lands as ORDINARY finished render jobs — done, unstarted (so
+        the mux waits for an explicit start like any added work), with
+        name-derived language/track/forced shown, dedup on re-add and
+        orphans reported."""
         try:
             import PyQt6  # noqa: F401
         except ImportError:
@@ -1542,7 +1545,7 @@ class TestPipelineAndQueue(unittest.TestCase):
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance() or QApplication([])  # noqa: F841
         from ttml2pgs.ui.widgets.queue_view import QueuePane
-        from ttml2pgs.core.jobqueue import QueueManager
+        from ttml2pgs.core.jobqueue import JobState, QueueManager
 
         with tempfile.TemporaryDirectory() as td:
             stem = 'For_All_Mankind_S01E10_A_City_Upon_a_Hill'
@@ -1558,22 +1561,33 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(unmatched, [orphan])
             (g,) = q.snapshot()
             self.assertEqual(g.video_path, video)
-            self.assertEqual(len(g.external_sups), 2)
-            by_path = {e.sup_path: e for e in g.external_sups}
-            self.assertEqual(by_path[s_merged].lang, 'ja')
-            self.assertEqual(by_path[s_merged].track_name, 'ja+en.forced')
-            self.assertEqual(by_path[s_forced].lang, 'en')
-            self.assertEqual(by_path[s_forced].track_name, '')
+            self.assertEqual(len(g.external_sups), 0)   # no special mode
+            jobs = {j.sub_path: j for j in g.render_jobs}
+            self.assertEqual(len(jobs), 2)
+            jm, jf = jobs[s_merged], jobs[s_forced]
+            self.assertEqual(jm.state, JobState.DONE)
+            self.assertEqual(jm.progress, 1.0)
+            self.assertEqual((jm.lang, jm.track_name),
+                             ('ja', 'ja+en.forced'))
+            self.assertEqual((jf.lang, jf.track_name), ('en', ''))
+            self.assertIn('FORCED flag', jf.message)
+            self.assertNotIn('FORCED flag', jm.message)
+            # done but UNSTARTED: holds the mux like any added work…
+            self.assertEqual(g.unstarted_count(), 2)
+            self.assertFalse(g.wants_mux())
+            # …and starting the group releases it
+            q.start_group(g.id)
+            self.assertEqual(g.unstarted_count(), 0)
+            self.assertTrue(g.wants_mux())
             # re-adding the same .sup replaces, never duplicates
             pane.queue_sup_files([s_merged])
             (g,) = q.snapshot()
-            self.assertEqual(len(g.external_sups), 2)
-            # track names of queued .sups are editable (persisted)
-            ent = next(e for e in g.external_sups
-                       if e.sup_path == s_merged)
-            q.set_external_track_name(ent.id, 'Japanese + signs')
-            self.assertEqual(
-                q.find_external(ent.id).track_name, 'Japanese + signs')
+            self.assertEqual(len(g.render_jobs), 2)
+            # track names editable like any render job's
+            j2 = next(j for j in g.render_jobs if j.sub_path == s_merged)
+            q.set_track_name(j2.id, 'Japanese + signs')
+            self.assertEqual(q.find_job(j2.id).track_name,
+                             'Japanese + signs')
 
     def test_mux_forced_flags_from_names(self):
         """At the mux boundary: '.en.forced' carries the forced flag,
@@ -1602,7 +1616,7 @@ class TestPipelineAndQueue(unittest.TestCase):
                                  RenderSettings(out_path=plainf),
                                  OverrideSet(), video_path=v, lang='en')
                 j.state = JobState.DONE
-                q.add_external_sup(v, merged, lang='ja',
+                q.add_finished_sup(v, merged, lang='ja',
                                    track_name='ja+en.forced')
                 (g,) = q.snapshot()
                 q._run_mux(g)
@@ -1682,6 +1696,27 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertFalse(g1.replace_original or g2.replace_original)
             pane._set_replace_selected(True)
             self.assertTrue(g1.replace_original and g2.replace_original)
+
+    def test_mux_preflight_disk_space(self):
+        """A nearly-full destination drive fails BEFORE writing with an
+        actionable message, not mkvmerge's mid-write 'error 112'."""
+        import collections
+        from ttml2pgs.core import video as vid
+        with tempfile.TemporaryDirectory() as td:
+            v = os.path.join(td, 'ep.mkv')
+            s = os.path.join(td, 'ep.ja.sup')
+            open(v, 'wb').write(b'x' * 1000)
+            open(s, 'wb').write(b'y' * 10)
+            DU = collections.namedtuple('usage', 'total used free')
+            orig = vid.shutil.disk_usage
+            vid.shutil.disk_usage = lambda p: DU(10 ** 12, 10 ** 12, 5000)
+            try:
+                ok, err = vid.remux(v, [vid.SubTrack(path=s, lang='ja')])
+            finally:
+                vid.shutil.disk_usage = orig
+            self.assertFalse(ok)
+            self.assertIn('not enough free space', err)
+            self.assertIn('Retry mux', err)
 
     def test_failed_mux_runs_once_and_others_proceed(self):
         """Batch regression: a failing mux must go FAILED after ONE

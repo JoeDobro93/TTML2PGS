@@ -119,8 +119,12 @@ class VideoGroup:
         return all(j.state.is_terminal() for j in self.render_jobs)
 
     def unstarted_count(self) -> int:
+        """Added-but-never-started jobs — they hold the group's mux.
+        A pre-rendered .sup loaded as a DONE job counts too: it waits
+        for an explicit start exactly like any other added work."""
         return sum(1 for j in self.render_jobs
-                   if not j.started and not j.state.is_terminal())
+                   if not j.started and
+                   j.state not in (JobState.CANCELED, JobState.FAILED))
 
     def wants_mux(self) -> bool:
         if not self.mux_enabled or self.video_path is None:
@@ -131,7 +135,7 @@ class VideoGroup:
         if self.mux_state in (JobState.DONE, JobState.RUNNING,
                               JobState.CANCELED, JobState.FAILED):
             return False
-        if not self.renders_settled():
+        if not self.renders_settled() or self.unstarted_count():
             return False
         done_subs = [j for j in self.render_jobs if j.state == JobState.DONE]
         return bool(done_subs or self.external_sups)
@@ -243,6 +247,31 @@ class QueueManager:
         self._notify()
         return job
 
+    def add_finished_sup(self, video_path: str, sup_path: str,
+                         lang: str = 'und', track_name: str = ''
+                         ) -> RenderJob:
+        """Queue an ALREADY-RENDERED .sup exactly as if its render job
+        had just finished: a DONE (unstarted) render job whose output
+        is the .sup itself. Everything behaves like any finished
+        render — checkboxes, 'added work holds the mux until started',
+        track-name editing, persistence (restored DONE while the file
+        exists) — no separate mode."""
+        from .video import parse_sup_name
+        job = self.add_render(None, sup_path,
+                              RenderSettings(out_path=sup_path),
+                              OverrideSet(), video_path=video_path,
+                              lang=lang, track_name=track_name)
+        _, _, forced = parse_sup_name(sup_path)
+        msg = f'loaded .sup — lang={lang}'
+        if forced:
+            msg += ' · FORCED flag'
+        with self._lock:
+            job.state = JobState.DONE
+            job.progress = 1.0
+            job.message = msg
+        self._notify()
+        return job
+
     def add_external_sup(self, video_path: str, sup_path: str,
                          lang: str = 'und', track_name: str = ''
                          ) -> ExternalSup:
@@ -304,17 +333,20 @@ class QueueManager:
         self._notify()
 
     def start_group(self, group_id: int):
-        """Arm the group's CHECKED jobs (unchecked ones sit out)."""
+        """Arm the group's CHECKED jobs (unchecked ones sit out).
+        Loaded already-DONE .sups get their started flag here too —
+        that's what releases the group's mux."""
         with self._lock:
             for g in self.groups:
                 if g.id == group_id:
                     for j in g.render_jobs:
-                        if j.checked and not j.state.is_terminal():
-                            j.started = True
-                            if j.state == JobState.PAUSED:
-                                j.state = JobState.PENDING
-                                if j.pipeline:
-                                    j.pipeline.pause_event.clear()
+                        if not j.checked:
+                            continue
+                        j.started = True
+                        if j.state == JobState.PAUSED:
+                            j.state = JobState.PENDING
+                            if j.pipeline:
+                                j.pipeline.pause_event.clear()
         self._wake.set()
         self._notify()
 
@@ -326,12 +358,13 @@ class QueueManager:
                 if not g.checked:
                     continue
                 for j in g.render_jobs:
-                    if j.checked and not j.state.is_terminal():
-                        j.started = True
-                        if j.state == JobState.PAUSED:
-                            j.state = JobState.PENDING
-                            if j.pipeline:
-                                j.pipeline.pause_event.clear()
+                    if not j.checked:
+                        continue
+                    j.started = True
+                    if j.state == JobState.PAUSED:
+                        j.state = JobState.PENDING
+                        if j.pipeline:
+                            j.pipeline.pause_event.clear()
         self._wake.set()
         self._notify()
 
@@ -758,6 +791,7 @@ class QueueManager:
                             'started': j.started,
                             'checked': j.checked,
                             'error': j.error,
+                            'message': j.message,
                         } for j in g.render_jobs],
                         'external': [{
                             'sup_path': e.sup_path, 'lang': e.lang,
@@ -824,6 +858,7 @@ class QueueManager:
                     if prev == 'done' and os.path.exists(settings.out_path):
                         job.state = JobState.DONE
                         job.progress = 1.0
+                        job.message = jd.get('message', '') or 'done'
                     elif prev == 'failed':
                         job.state = JobState.FAILED
                         job.error = jd.get('error', '') or \

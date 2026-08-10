@@ -158,9 +158,10 @@ preview immediately.
 ## Render queue (left dock)
 
 Adding files stages them; **▶ Render all / ▶ Render selected** actually
-starts work. **Queue .sup files…** takes already-rendered `.sup` files
-(many at once) straight to muxing: each is matched to a video by file
-name and grouped with it, and the extension chain sets the language,
+starts work. **Queue .sup files…** loads already-rendered `.sup` files
+(many at once) as finished render jobs — matched to a video by file
+name, shown done at 100%, waiting like any added work until you start
+them, then the video muxes. The extension chain sets the language,
 forced flag and track label (`.ja` → Japanese, `.en.forced` → English +
 forced flag, `.ja+en.forced` → a NON-forced Japanese-language track
 labeled `ja+en.forced` — the ".forced" is the merged-in signs, not the

@@ -351,6 +351,25 @@ def remux(video_path: str, subs: List[SubTrack],
     directory = os.path.dirname(video_path)
     name, ext = os.path.splitext(os.path.basename(video_path))
     out_tmp = os.path.join(directory, f"{name}.t2p_mux.mkv")
+
+    # muxing writes a FULL temporary copy of the video next to it —
+    # check the headroom up front so a nearly-full drive gives a clear
+    # message instead of mkvmerge dying mid-write with 'error 112'
+    try:
+        need = os.path.getsize(video_path) + sum(
+            os.path.getsize(s.path) for s in subs)
+        free = shutil.disk_usage(directory).free
+        margin = 256 << 20                       # 256 MB safety
+        if free < need + margin:
+            drive = os.path.splitdrive(directory)[0] or directory
+            return False, (
+                f"not enough free space on {drive}: muxing writes a "
+                f"full temporary copy of the video first — needs "
+                f"~{(need + margin) / 1e9:.1f} GB free, only "
+                f"{free / 1e9:.1f} GB available. Free up space and "
+                f"use Retry mux.")
+    except OSError:
+        pass                                     # preflight is best-effort
     final = os.path.join(directory, f"{name}.mkv") if replace_original \
         else os.path.join(directory, f"{name}.muxed.mkv")
 
