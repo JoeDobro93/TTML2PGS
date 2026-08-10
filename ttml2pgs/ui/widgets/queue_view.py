@@ -175,6 +175,12 @@ class QueuePane(QWidget):
         self.b_clear_all.setToolTip(
             'Remove EVERYTHING from the queue (running jobs are '
             'canceled). Asks first.')
+        self.b_add_sups = QPushButton('Queue .sup files…')
+        self.b_add_sups.setToolTip(
+            'Pick already-rendered .sup files (several at once) to mux. '
+            'Each is matched to a video by file name and grouped with '
+            'it; language, forced flag and track label come from the '
+            'extension chain (.ja, .en.forced, .ja+en.forced…).')
         row1 = QHBoxLayout()
         row1.addWidget(self.b_start_all)
         row1.addWidget(self.b_start_sel)
@@ -185,6 +191,7 @@ class QueuePane(QWidget):
         row2 = QHBoxLayout()
         row2.addWidget(self.b_pause)
         row2.addWidget(self.b_resume)
+        row2.addWidget(self.b_add_sups)
         row2.addWidget(self.b_clear)
         row2.addWidget(self.b_clear_all)
         row2.addStretch()
@@ -213,6 +220,7 @@ class QueuePane(QWidget):
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         lay.addWidget(self.tree)
 
+        self.b_add_sups.clicked.connect(self._queue_sups)
         self.b_start_all.clicked.connect(self._start_all)
         self.b_start_sel.clicked.connect(self._start_selected)
         self.b_check_sel.clicked.connect(lambda: self._check_selected(True))
@@ -379,6 +387,45 @@ class QueuePane(QWidget):
         for g in groups:
             self.queue.remove_group(g.id)
         self.refresh()
+
+    def _queue_sups(self):
+        """Pick several already-rendered .sup files and queue them for
+        muxing, matched to videos by file name."""
+        self.before_popup()
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, 'Queue .sup files for muxing', '',
+            'PGS subtitles (*.sup)')
+        if not paths:
+            return
+        unmatched = self.queue_sup_files(paths)
+        self.refresh()
+        if unmatched:
+            shown = '\n'.join('• ' + os.path.basename(p)
+                              for p in unmatched[:12])
+            if len(unmatched) > 12:
+                shown += f'\n… and {len(unmatched) - 12} more'
+            QMessageBox.warning(
+                self, 'Queue .sup files',
+                'No matching video found next to these files (they '
+                'were not queued):\n\n' + shown)
+
+    def queue_sup_files(self, paths) -> List[str]:
+        """Match each .sup to a video next to it (same stem rules as
+        subtitles — language/flag/'ja+en' tokens ignored) and add it to
+        that video's mux group. Language, track label and forced flag
+        come from the extension chain. Returns unmatched paths."""
+        from ...core.video import find_matching_video, parse_sup_name
+        unmatched: List[str] = []
+        for p in paths:
+            video = find_matching_video(p)
+            if not video:
+                unmatched.append(p)
+                continue
+            lang, track, _forced = parse_sup_name(p)
+            self.queue.add_external_sup(video, p, lang=lang,
+                                        track_name=track)
+        return unmatched
 
     def _clear_finished(self):
         for g in self.queue.snapshot():

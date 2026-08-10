@@ -118,18 +118,68 @@ _STEM_DROP = {'forced', 'sdh', 'cc', 'full', 'default', 'dialog',
               'signs', 'songs', 'hi'}
 
 
+def _is_tag_token(tok: str) -> bool:
+    """Language / flag suffix token, including 'ja+en' merge combos."""
+    from .parsers import LANG_TOKENS
+    if tok in LANG_TOKENS or tok in _STEM_DROP:
+        return True
+    pieces = [p for p in tok.split('+') if p]
+    return len(pieces) > 1 and all(
+        p in LANG_TOKENS or p in _STEM_DROP for p in pieces)
+
+
 def subtitle_stem(path: str) -> str:
-    """'Show.S01E01.ja.forced.ttml' -> 'Show.S01E01'."""
+    """'Show.S01E01.ja.forced.ttml' -> 'Show.S01E01' (merged outputs
+    like 'Show.S01E01.ja+en.forced.sup' strip the same way)."""
     name = os.path.basename(path)
     parts = name.split('.')
     if len(parts) <= 1:
         return name
     parts = parts[:-1]  # drop extension
-    from .parsers import LANG_TOKENS
-    while len(parts) > 1 and (parts[-1].lower() in LANG_TOKENS or
-                              parts[-1].lower() in _STEM_DROP):
+    while len(parts) > 1 and _is_tag_token(parts[-1].lower()):
         parts.pop()
     return '.'.join(parts)
+
+
+def parse_sup_name(path: str) -> Tuple[str, str, bool]:
+    """
+    (language, mux track name, forced) from a .sup's extension chain —
+    the inverse of the app's own output naming:
+
+        'Ep.ja.sup'           → ('ja', '', False)
+        'Ep.en.forced.sup'    → ('en', '', True)
+        'Ep.ja+en.forced.sup' → ('ja', 'ja-en.forced', True)   merged
+        'Ep.en+ja.sup'        → ('en', 'en-ja', False)
+        'Ep.sup'              → ('und', '', False)
+
+    A 'x+y' combo speaks the FIRST language; the track label keeps the
+    whole combo ('-'-joined, '.forced' appended — the merge naming).
+    """
+    from .parsers import LANG_TOKENS
+    name = os.path.basename(path)
+    parts = name.split('.')[:-1] if '.' in name else [name]
+    forced = False
+    combo: List[str] = []
+    while len(parts) > 1:
+        tok = parts[-1].lower()
+        if tok in _STEM_DROP:
+            forced = forced or tok == 'forced'
+            parts.pop()
+            continue
+        pieces = [p for p in tok.split('+') if p]
+        if pieces and all(p in LANG_TOKENS for p in pieces):
+            if not combo:                    # nearest-to-extension wins
+                combo = [LANG_TOKENS[p] for p in pieces]
+            parts.pop()
+            continue
+        break
+    lang = combo[0] if combo else 'und'
+    track = ''
+    if len(combo) > 1:
+        track = '-'.join(combo)
+        if forced:
+            track += '.forced'
+    return lang, track, forced
 
 
 def find_matching_video(sub_path: str,

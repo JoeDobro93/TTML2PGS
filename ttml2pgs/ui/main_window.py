@@ -115,7 +115,6 @@ class MainWindow(QMainWindow):
         self.sources_pane.session_changed.connect(self._session_changed)
         self.sources_pane.render_requested.connect(self._render_one)
         self.sources_pane.render_all_requested.connect(self._render_all)
-        self.sources_pane.add_sup_requested.connect(self._queue_external_sup)
         self.sources_pane.overrides_loaded.connect(self._adopt_overrides)
         self.cue_pane.cue_selected.connect(self.preview_pane.set_cue)
         self.cue_pane.cue_selected.connect(self._cue_selected_for_editor)
@@ -551,13 +550,6 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f'Added {os.path.basename(settings.out_path)} to the queue — '
             f'start it from the queue panel', 5000)
-
-    def _queue_external_sup(self, video_path: str, sup_path: str):
-        from ..core.parsers import detect_language_from_filename
-        lang = detect_language_from_filename(sup_path) or 'und'
-        self.queue.add_external_sup(video_path, sup_path, lang=lang)
-        self._show_queue()
-        self.queue_pane.refresh()
 
     def _on_queue_changed(self):
         self.queue_pane.refresh()

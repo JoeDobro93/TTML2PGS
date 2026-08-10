@@ -248,6 +248,14 @@ class QueueManager:
                          ) -> ExternalSup:
         ent = ExternalSup(sup_path=sup_path, lang=lang, track_name=track_name)
         with self._lock:
+            # re-queuing the same .sup REPLACES the old entry (wherever
+            # it sat) instead of stacking duplicate mux tracks
+            norm = os.path.normcase(os.path.abspath(sup_path))
+            for g in self.groups:
+                g.external_sups = [
+                    e for e in g.external_sups
+                    if os.path.normcase(os.path.abspath(e.sup_path)) != norm]
+            self._prune_empty_groups()
             group = self._group_for_video(video_path)
             group.external_sups.append(ent)
             if group.mux_state.is_terminal():
@@ -766,9 +774,13 @@ class QueueManager:
             for gd in data.get('groups', []):
                 renders = gd.get('renders', [])
                 prev_mux = gd.get('mux_state', 'waiting')
-                mux_over = (not bool(gd.get('mux_enabled', True))
-                            or not gd.get('video_path')
-                            or prev_mux == 'done')
+                # a group with a video whose mux hasn't run is NEVER
+                # finished — even with mux currently disabled and every
+                # render done, the user can toggle mux on and run it
+                # (a 50-episode render-now-mux-later batch must survive
+                # relaunches). Only no-video groups or muxed groups
+                # count as over.
+                mux_over = not gd.get('video_path') or prev_mux == 'done'
                 if renders and mux_over and \
                         all(jd.get('state') == 'done' for jd in renders):
                     continue                     # finished — clear it out

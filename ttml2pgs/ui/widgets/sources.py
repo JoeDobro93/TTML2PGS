@@ -155,7 +155,6 @@ class SourcesPane(QWidget):
     session_changed = pyqtSignal(int)          # data edited (video/offset…)
     render_requested = pyqtSignal(int)         # render this one
     render_all_requested = pyqtSignal()
-    add_sup_requested = pyqtSignal(str, str)   # video_path, sup_path
     overrides_loaded = pyqtSignal(object)      # OverrideSet from a .t2p
 
     HEADERS = ['Subtitle', 'Lang', 'Video', 'Res', 'HDR', 'Src fps',
@@ -173,7 +172,6 @@ class SourcesPane(QWidget):
         bar = QHBoxLayout()
         b_add = QPushButton('Add subtitles…')
         b_folder = QPushButton('Add folder…')
-        b_sup = QPushButton('Queue external .sup…')
         b_close = QPushButton('Close selected')
         b_close_all = QPushButton('Close all…')
         b_merge = QPushButton('Merge selected…')
@@ -185,7 +183,6 @@ class SourcesPane(QWidget):
             'secondary language once for the whole batch.')
         bar.addWidget(b_add)
         bar.addWidget(b_folder)
-        bar.addWidget(b_sup)
         bar.addWidget(b_close)
         bar.addWidget(b_close_all)
         bar.addWidget(b_merge)
@@ -250,7 +247,6 @@ class SourcesPane(QWidget):
 
         b_add.clicked.connect(self._add_files)
         b_folder.clicked.connect(self._add_folder)
-        b_sup.clicked.connect(self._add_external_sup)
         b_close.clicked.connect(self._close_selected)
         b_close_all.clicked.connect(self._close_all)
         b_merge.clicked.connect(self._merge_selected)
@@ -432,19 +428,6 @@ class SourcesPane(QWidget):
             QMessageBox.StandardButton.No)
         if r == QMessageBox.StandardButton.Yes:
             self.overrides_loaded.emit(ov)
-
-    def _add_external_sup(self):
-        self.before_popup()
-        sup, _ = QFileDialog.getOpenFileName(
-            self, 'Pick a .sup to queue for muxing', '', 'PGS (*.sup)')
-        if not sup:
-            return
-        video, _ = QFileDialog.getOpenFileName(
-            self, 'Target video for this .sup', '',
-            'Video (*.mkv *.mp4 *.m4v *.ts *.m2ts)')
-        if not video:
-            return
-        self.add_sup_requested.emit(video, sup)
 
     def _close_selected(self):
         rows = self._selected_rows()

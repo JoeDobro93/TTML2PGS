@@ -1472,6 +1472,100 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertEqual(q2.groups[0].render_jobs[0].track_name,
                              'ja-en')
 
+    def test_queue_survives_relaunch_until_muxed(self):
+        """Round 29: a group WITH a video whose mux hasn't run survives
+        a relaunch — even with every render done and mux currently
+        disabled (render-now-mux-later batches) — its .sups restoring
+        as DONE. Muxed groups still clear out."""
+        from ttml2pgs.core.jobqueue import JobState, QueueManager
+        with tempfile.TemporaryDirectory() as td:
+            state = os.path.join(td, 'q.json')
+            v1 = os.path.join(td, 'ep1.mkv')
+            v2 = os.path.join(td, 'ep2.mkv')
+            sup1 = os.path.join(td, 'ep1.ja.sup')
+            sup2 = os.path.join(td, 'ep2.ja.sup')
+            for p in (v1, v2, sup1, sup2):
+                open(p, 'wb').write(b'x')
+            q = QueueManager(state_path=state)
+            j1 = q.add_render(None, 'ep1.ja.vtt',
+                              RenderSettings(out_path=sup1),
+                              OverrideSet(), video_path=v1, lang='ja')
+            j2 = q.add_render(None, 'ep2.ja.vtt',
+                              RenderSettings(out_path=sup2),
+                              OverrideSet(), video_path=v2, lang='ja')
+            for j in (j1, j2):
+                j.state = JobState.DONE
+                j.started = True
+                j.progress = 1.0
+            g1, g2 = q.snapshot()
+            g1.mux_enabled = False               # mux-later batch
+            g2.mux_state = JobState.DONE         # fully muxed
+            q._save_state()
+
+            q2 = QueueManager(state_path=state)
+            self.assertEqual(q2.load_state(), 1)
+            (g,) = q2.snapshot()
+            self.assertEqual(g.video_path, v1)
+            self.assertFalse(g.mux_enabled)      # still off until toggled
+            self.assertEqual(g.render_jobs[0].state, JobState.DONE)
+            self.assertEqual(g.render_jobs[0].progress, 1.0)
+
+    def test_parse_sup_name_and_stem_combos(self):
+        """Round 29: language / track label / forced from a .sup's
+        extension chain; 'ja+en' merge combos strip from stems too."""
+        from ttml2pgs.core.video import parse_sup_name, subtitle_stem
+        self.assertEqual(parse_sup_name('Ep.ja.sup'), ('ja', '', False))
+        self.assertEqual(parse_sup_name('Ep.en.forced.sup'),
+                         ('en', '', True))
+        self.assertEqual(parse_sup_name('Ep.ja+en.forced.sup'),
+                         ('ja', 'ja-en.forced', True))
+        self.assertEqual(parse_sup_name('Ep.en+ja.sup'),
+                         ('en', 'en-ja', False))
+        self.assertEqual(parse_sup_name('Ep.sup'), ('und', '', False))
+        # nonstandard codes normalize ('jp' → ja, 'eng' → en)
+        self.assertEqual(parse_sup_name('Show.S01E10.jp+eng.forced.sup'),
+                         ('ja', 'ja-en.forced', True))
+        self.assertEqual(subtitle_stem('Show.S01E01.ja+en.forced.sup'),
+                         'Show.S01E01')
+
+    def test_queue_sup_files_matching(self):
+        """Round 29: batch .sup queueing matches videos by stem, groups
+        by video, parses names, dedupes re-adds and reports orphans."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.queue_view import QueuePane
+        from ttml2pgs.core.jobqueue import QueueManager
+
+        with tempfile.TemporaryDirectory() as td:
+            stem = 'For_All_Mankind_S01E10_A_City_Upon_a_Hill'
+            video = os.path.join(td, stem + '.mkv')
+            s_merged = os.path.join(td, stem + '.ja+en.forced.sup')
+            s_forced = os.path.join(td, stem + '.en.forced.sup')
+            orphan = os.path.join(td, 'Something_Else.ja.sup')
+            for p in (video, s_merged, s_forced, orphan):
+                open(p, 'wb').write(b'x')
+            q = QueueManager()                 # never started: no threads
+            pane = QueuePane(q, app_settings={})
+            unmatched = pane.queue_sup_files([s_merged, s_forced, orphan])
+            self.assertEqual(unmatched, [orphan])
+            (g,) = q.snapshot()
+            self.assertEqual(g.video_path, video)
+            self.assertEqual(len(g.external_sups), 2)
+            by_path = {e.sup_path: e for e in g.external_sups}
+            self.assertEqual(by_path[s_merged].lang, 'ja')
+            self.assertEqual(by_path[s_merged].track_name, 'ja-en.forced')
+            self.assertEqual(by_path[s_forced].lang, 'en')
+            self.assertEqual(by_path[s_forced].track_name, '')
+            # re-adding the same .sup replaces, never duplicates
+            pane.queue_sup_files([s_merged])
+            (g,) = q.snapshot()
+            self.assertEqual(len(g.external_sups), 2)
+
     def test_bulk_mux_toggles_in_queue_pane(self):
         """Round 28: the multi-select context menu's mux settings apply
         to every selected group AND the parent groups of selected

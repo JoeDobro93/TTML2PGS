@@ -66,7 +66,6 @@ named like `Episode01.ja+en.sup` with a `ja-en` track name you can edit in
 the queue. An optional timestamp snap aligns the secondary language's cue
 edges to the primary's while merging.
 
-**Queue external .sup…** adds an already-rendered `.sup` for mux-only.
 **Only checked cues** renders just the cues you've ticked in the cue list.
 **Add to queue** (or Render → Add all, `Ctrl+F5`) stages files in the render
 queue — nothing starts rendering until you start it from the queue panel.
@@ -159,7 +158,12 @@ preview immediately.
 ## Render queue (left dock)
 
 Adding files stages them; **▶ Render all / ▶ Render selected** actually
-starts work. Every video and subtitle row has a MakeMKV-style checkbox —
+starts work. **Queue .sup files…** takes already-rendered `.sup` files
+(many at once) straight to muxing: each is matched to a video by file
+name and grouped with it, and the extension chain sets the language,
+forced flag and track label (`.ja` → Japanese, `.en.forced` → English +
+forced, `.ja+en.forced` → Japanese-language merged track labeled
+`ja-en.forced`). Every video and subtitle row has a MakeMKV-style checkbox —
 unchecked rows sit out of batch starts. Jobs group per target video, and a
 video remuxes as soon as *its* subtitles finish, so one bad episode never
 costs you the finished ones. Pause checkpoints mid-job and Resume picks up
