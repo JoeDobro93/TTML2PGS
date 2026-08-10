@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         self.sources_pane.render_requested.connect(self._render_one)
         self.sources_pane.render_all_requested.connect(self._render_all)
         self.sources_pane.add_sup_requested.connect(self._queue_external_sup)
+        self.sources_pane.overrides_loaded.connect(self._adopt_overrides)
         self.cue_pane.cue_selected.connect(self.preview_pane.set_cue)
         self.cue_pane.cue_selected.connect(self._cue_selected_for_editor)
         self.cue_pane.cues_changed.connect(self._cues_edited)
@@ -270,6 +271,16 @@ class MainWindow(QMainWindow):
         self.cue_pane.refresh_regions()
         self.preview_pane.schedule_render()
 
+    def _adopt_overrides(self, ov):
+        """Apply a .t2p's saved Global Overrides (user confirmed)."""
+        self.state.overrides.adopt(ov)
+        self.settings_pane._rebuild_lang_tabs()
+        self.settings_pane.layout_editor._load()
+        dlg = getattr(self, '_pref_dialog', None)
+        if dlg is not None:
+            dlg._reload_profiles()
+        self._overrides_edited()
+
     def _overrides_edited(self):
         self.state.save_settings()
         # keep the queue's live option in step with the settings pane
@@ -424,12 +435,16 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
+            # exports bake the CURRENT overrides so the file looks like
+            # the render (SDR/HDR follows the bound video)
+            ov = self.state.overrides
+            hdr = bool(sess.video_info and sess.video_info.is_hdr)
             if fmt == 'ttml':
-                text = export_ttml(sess.doc)
+                text = export_ttml(sess.doc, overrides=ov, is_hdr=hdr)
             elif fmt == 'vtt':
-                text = export_vtt(sess.doc)
+                text = export_vtt(sess.doc, overrides=ov, is_hdr=hdr)
             else:
-                text = export_srt(sess.doc)
+                text = export_srt(sess.doc, overrides=ov, is_hdr=hdr)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(text)
             self.statusBar().showMessage(f'Exported {path}', 4000)

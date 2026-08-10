@@ -762,6 +762,162 @@ class TestExporters(unittest.TestCase):
         self.assertEqual(extras['video_path'], '/x/y.mkv')
 
 
+class TestExportFidelity(unittest.TestCase):
+    """Round 21: exports must land text where the app renders it and
+    carry the app's override styling."""
+
+    def _band_doc(self):
+        """A merged-style doc: ja bottom band (point-x/bottom-y anchors)
+        + en full-width band at 65.75% with after-aligned text."""
+        from ttml2pgs.core.model import Region
+        doc = SubtitleDocument()
+        doc.language = 'ja'
+        r = Region(id='横下', x=Dim(50, '%'), x_edge='point',
+                   y=Dim(3.5, 'vh'), y_edge='bottom',
+                   width=Dim(80, 'vw'), height=Dim(15, 'vh'))
+        r.style = Style(display_align='before')
+        doc.regions['横下'] = r
+        r2 = Region(id='縦右', x=Dim(10, 'vw'), x_edge='right',
+                    y=Dim(50, '%'), y_edge='point',
+                    width=Dim(15, 'vw'), height=Dim(80, 'vh'))
+        r2.style = Style(writing_mode='tbrl')
+        doc.regions['縦右'] = r2
+        r3 = Region(id='r0.en', x=Dim(0, '%'), x_edge='left',
+                    y=Dim(65.75, '%'), y_edge='top',
+                    width=Dim(100, '%'), height=Dim(15, '%'))
+        r3.style = Style(text_align='center', display_align='after')
+        doc.regions['r0.en'] = r3
+
+        def cue(b, e, rid, text, lang):
+            c = Cue(begin_ms=b, end_ms=e, region_id=rid)
+            c.root.children.append(SpanNode.text_node(text))
+            c.lang = lang
+            doc.cues.append(c)
+            return c
+        cue(1000, 2000, '横下', 'こんにちは', 'ja')
+        cue(1500, 2500, 'r0.en', 'Hello.', 'en')
+        return doc
+
+    def test_ttml_position_emission_valid_and_roundtrips(self):
+        doc = self._band_doc()
+        text = export_ttml(doc)
+        self.assertIn('tts:position="center bottom 3.5vh"', text)
+        self.assertIn('tts:position="right 10vw center"', text)
+        self.assertNotIn('"50% bottom', text)     # the old invalid mix
+        # anchoring round-trips through our parser to the same pixels
+        doc2 = TTMLParser().parse_string(text)
+        canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+        ra = CueRenderer(doc, canvas)
+        rb = CueRenderer(doc2, canvas)
+        for rid in ('横下', '縦右'):
+            a = ra._region_rect(doc.regions[rid])
+            b = rb._region_rect(doc2.regions[rid])
+            xa, ya = ra._anchor_pos(a, a['w'], a['h'])
+            xb, yb = rb._anchor_pos(b, b['w'], b['h'])
+            self.assertAlmostEqual(xa, xb, places=2, msg=rid)
+            self.assertAlmostEqual(ya, yb, places=2, msg=rid)
+
+    def test_vtt_cue_settings_follow_alignment(self):
+        doc = self._band_doc()
+        text = export_vtt(doc)
+        ja_line = next(l for l in text.splitlines() if '00:00:01.000' in l)
+        en_line = next(l for l in text.splitlines() if '00:00:01.500' in l)
+        # ja: bottom band 3.5vh + 15vh tall, display before → text top
+        # at 81.5%; centered 80% wide → NO position setting
+        self.assertIn('line:81.5%', ja_line)
+        self.assertIn('size:80%', ja_line)
+        self.assertNotIn('position:', ja_line)
+        # en: full-width band at 65.75%+15% with after-aligned text →
+        # line at the band bottom, END-aligned; centered → no position
+        self.assertIn('line:80.75%,end', en_line)
+        self.assertNotIn('position:', en_line)
+        self.assertNotIn('line-left', en_line)
+
+    def test_exports_bake_overrides(self):
+        doc = self._band_doc()
+        ov = OverrideSet()
+        base = ov.by_lang['']
+        base.override_font_size = True
+        base.font_size = Dim(3.25, 'vh')
+        base.auto_sdr_color = (229, 229, 229, 255)
+        en = ov.ensure_language('en')
+        en.override_font_size = True
+        en.font_size = Dim(2.75, 'vh')
+        en.auto_sdr_color = (255, 238, 140, 255)
+
+        ttml = export_ttml(doc, overrides=ov, is_hdr=False)
+        self.assertIn('tts:color="#ffee8c"', ttml)
+        self.assertIn('tts:fontSize="2.75vh"', ttml)
+        self.assertIn('tts:color="#e5e5e5"', ttml)
+        self.assertRegex(ttml, r'<p[^>]*style="[^"]*ov\.en"[^>]*>Hello')
+
+        vtt = export_vtt(doc, overrides=ov, is_hdr=False)
+        self.assertIn('::cue(.lang-en)', vtt)
+        self.assertIn('color: #ffee8c;', vtt)
+        self.assertIn('font-size: 2.75vh;', vtt)
+        self.assertIn('<c.lang-en>', vtt)
+        # the reparsed VTT resolves the en cue to the override color
+        doc2 = VTTParser().parse_string(vtt)
+        en_cue = next(c for c in doc2.cues if 'Hello' in c.plain_text())
+        span = next(ch for ch in en_cue.root.children
+                    if ch.kind == 'span')
+        computed = doc2.resolve_style(
+            [(en_cue.style_refs, en_cue.inline_style),
+             (span.style_refs, span.inline_style)], None)
+        self.assertEqual(computed.color, (255, 238, 140, 255))
+
+        srt = export_srt(doc, overrides=ov, is_hdr=False)
+        self.assertIn('<font color="#ffee8c">Hello.</font>', srt)
+
+    def test_region_hint_updates_on_edit(self):
+        """Moving a region across the midline flips its position hint
+        (the list refreshes on region edits)."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.settings_panel import SettingsPane
+        doc = self._band_doc()
+        sp = SettingsPane(OverrideSet(), {})
+        sp.set_document(doc)
+        def hint(rid):
+            for i in range(sp.region_list.count()):
+                if sp.region_list.item(i).text() == rid:
+                    return sp.region_list.item(i).data(
+                        Qt.ItemDataRole.UserRole)
+        self.assertEqual(hint('横下'), 'bottom')
+        doc.regions['横下'].y = Dim(75, 'vh')     # now in the top half
+        sp.refresh_region_hints()
+        self.assertEqual(hint('横下'), 'top')
+
+    def test_t2p_overrides_prompt_payload_and_adopt(self):
+        """load_project surfaces the saved overrides; adopt applies
+        them in place (panes keep their object references)."""
+        from ttml2pgs.core.project import load_project
+        with tempfile.TemporaryDirectory() as td:
+            doc = self._band_doc()
+            ov = OverrideSet()
+            en = ov.ensure_language('en')
+            en.override_font_size = True
+            en.font_size = Dim(2.75, 'vh')
+            p = os.path.join(td, 'proj.t2p')
+            save_project(p, doc, ov, {})
+            _doc2, ov2, _extras = load_project(p)
+            self.assertIsNotNone(ov2)
+            self.assertTrue(ov2.by_lang['en'].override_font_size)
+
+            live = OverrideSet()
+            layout_obj = live.layout
+            live.adopt(ov2)
+            self.assertIs(live.layout, layout_obj)      # identity kept
+            self.assertIn('en', live.by_lang)
+            self.assertEqual(str(live.by_lang['en'].font_size), '2.75vh')
+
+
 class TestPipelineAndQueue(unittest.TestCase):
     def test_pipeline_pause_resume(self):
         doc = load_subtitle(sample('netflix_ja.ttml'))

@@ -156,6 +156,7 @@ class SourcesPane(QWidget):
     render_requested = pyqtSignal(int)         # render this one
     render_all_requested = pyqtSignal()
     add_sup_requested = pyqtSignal(str, str)   # video_path, sup_path
+    overrides_loaded = pyqtSignal(object)      # OverrideSet from a .t2p
 
     HEADERS = ['Subtitle', 'Lang', 'Video', 'Res', 'HDR', 'Src fps',
                'Tgt fps', 'Conform', 'Offset ms', 'Output']
@@ -383,8 +384,33 @@ class SourcesPane(QWidget):
         except Exception as e:
             QMessageBox.warning(self, 'Open failed', f'{path}\n\n{e}')
             return
+        self._maybe_adopt_project_overrides(path)
         self.refresh()
         self.session_activated.emit(self.state.active_index)
+
+    def _maybe_adopt_project_overrides(self, path: str):
+        """A .t2p can carry the Global Overrides it was saved with —
+        offer to apply them."""
+        from PyQt6.QtWidgets import QMessageBox
+        if not path.lower().endswith('.t2p'):
+            return
+        try:
+            from ...core.project import load_project
+            _doc, ov, _extras = load_project(path)
+        except Exception:
+            return
+        if ov is None:
+            return
+        r = QMessageBox.question(
+            self, 'Project overrides',
+            'This project file contains saved Global Overrides '
+            '(Default and per-language settings).\n\n'
+            'Overwrite the current Global Overrides with the ones in '
+            'this file?',
+            QMessageBox.StandardButton.Yes |
+            QMessageBox.StandardButton.No)
+        if r == QMessageBox.StandardButton.Yes:
+            self.overrides_loaded.emit(ov)
 
     def _add_external_sup(self):
         sup, _ = QFileDialog.getOpenFileName(

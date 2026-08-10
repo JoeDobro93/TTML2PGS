@@ -1189,6 +1189,7 @@ class SettingsPane(QWidget):
         rb_del.clicked.connect(self._del_region)
         self.region_list.currentTextChanged.connect(self._region_selected)
         self.region_editor.changed.connect(self.document_changed.emit)
+        self.region_editor.changed.connect(self.refresh_region_hints)
 
         # ---- initial tab --------------------------------------------- #
         self.initial_editor = StyleEditor()
@@ -1312,6 +1313,24 @@ class SettingsPane(QWidget):
             if self.doc and sid in self.doc.styles:
                 it.setData(Qt.ItemDataRole.UserRole,
                            style_hints(self.doc.styles[sid]))
+
+    def refresh_region_hints(self):
+        """Recompute the position hints — a region edit (anchor, size,
+        alignment) can move it to another screen area."""
+        if not self.doc:
+            return
+        from ...core.renderer import classify_region_position
+        for i in range(self.region_list.count()):
+            it = self.region_list.item(i)
+            rid = it.text()
+            if rid in self.doc.regions:
+                try:
+                    it.setData(Qt.ItemDataRole.UserRole,
+                               classify_region_position(
+                                   self.doc, self.doc.regions[rid]))
+                except Exception:
+                    pass
+        self.region_list.viewport().update()
 
     def set_document(self, doc: Optional[SubtitleDocument]):
         self.doc = doc

@@ -235,6 +235,15 @@ class OverrideSet:
             self.by_lang[lang] = so
         return self.by_lang.get(lang, self.by_lang[''])
 
+    def adopt(self, other: 'OverrideSet'):
+        """Take over another set's contents IN PLACE — the panes hold
+        references to this object (and to .layout), so identity must
+        survive (used when a .t2p's saved overrides are applied)."""
+        self.layout.__dict__.update(other.layout.__dict__)
+        self.by_lang = other.by_lang
+        self.by_lang.setdefault('', StyleOverrides())
+        self.profiles = other.profiles
+
     # -- (de)serialization --------------------------------------------- #
     def to_dict(self) -> dict:
         from .project import style_to_json

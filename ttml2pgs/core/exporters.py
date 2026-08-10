@@ -10,7 +10,7 @@ SRT keeps text, basic tags, font color and an ``{\\anX}`` position hint.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .colors import to_hex
 from .model import Cue, Region, Shadow, SpanNode, Style, SubtitleDocument
@@ -114,7 +114,49 @@ def _ms_to_ttml(ms: float) -> str:
     return format_vtt_timestamp(ms)
 
 
-def export_ttml(doc: SubtitleDocument) -> str:
+def _position_value(region: Region) -> str:
+    """
+    CSS-valid tts:position for a region's anchoring.
+
+    CSS's %-offset-from-edge semantics equal our 'point' anchoring
+    (offset scales with container minus region), so every axis maps to
+    a keyword form: point p% → 'left p%' / 'top p%', edges keep their
+    keyword, 50% points become 'center'. The result parses back to the
+    identical anchoring and is valid for other TTML consumers (the old
+    emission could produce invalid mixes like '50% bottom 3.5vh').
+    """
+    def axis(edge: str, val, kw_lo: str, kw_hi: str) -> str:
+        if edge == 'center':
+            return 'center'
+        if edge == 'point':
+            if val is not None and val.unit == '%':
+                if abs(val.value - 50.0) < 1e-6:
+                    return 'center'
+                return f'{kw_lo} {val}'
+            return f'{kw_lo} {val}' if val is not None else 'center'
+        if edge == kw_hi:
+            return f'{kw_hi} {val}' if val is not None else kw_hi
+        return f'{kw_lo} {val}' if val is not None else kw_lo
+
+    hor = axis(region.x_edge, region.x, 'left', 'right')
+    ver = axis(region.y_edge, region.y, 'top', 'bottom')
+    return f'{hor} {ver}'
+
+
+def _override_style(overrides, lang: str, is_hdr: bool) -> Optional[Style]:
+    """The effective per-language override styling as a Style, or None
+    when nothing is forced (auto-color counts — it IS the rendered
+    color)."""
+    if overrides is None:
+        return None
+    so = overrides.for_language(lang)
+    st = so.to_style(is_hdr=is_hdr)
+    st.opacity_mult = None                # not expressible in exports
+    return st if st.set_props() else None
+
+
+def export_ttml(doc: SubtitleDocument, overrides=None,
+                is_hdr: bool = False) -> str:
     ET.register_namespace('', _TT)
     root = ET.Element('tt', {
         'xmlns': _TT, 'xmlns:tts': _TTS, 'xmlns:ttp': _TTP,
@@ -139,6 +181,24 @@ def export_ttml(doc: SubtitleDocument) -> str:
         if st.parent_ids:
             attrs['style'] = ' '.join(st.parent_ids)
         ET.SubElement(styling, 'style', attrs)
+    # bake the app's per-language overrides so the export looks like
+    # the render: one style per language, referenced LAST on each cue
+    ov_style_ids: Dict[str, str] = {}
+    if overrides is not None:
+        for lang in sorted({(c.lang or doc.language or '')
+                            for c in doc.cues}):
+            st = _override_style(overrides, lang, is_hdr)
+            if st is None:
+                continue
+            sid = f'ov.{lang or "default"}'
+            n = 2
+            while sid in doc.styles:
+                sid = f'ov.{lang or "default"}_{n}'
+                n += 1
+            attrs = _style_attrs(st)
+            attrs['xml:id'] = sid
+            ET.SubElement(styling, 'style', attrs)
+            ov_style_ids[lang] = sid
     layout = ET.SubElement(head, 'layout')
     for rid, region in doc.regions.items():
         if rid == '__default__':
@@ -152,11 +212,7 @@ def export_ttml(doc: SubtitleDocument) -> str:
         if region.x_edge == 'left' and region.y_edge == 'top':
             attrs['tts:origin'] = f"{x} {y}"
         else:
-            hor = {'left': f"left {x}", 'right': f"right {x}",
-                   'center': 'center', 'point': f"{x}"}[region.x_edge]
-            ver = {'top': f"top {y}", 'bottom': f"bottom {y}",
-                   'center': 'center', 'point': f"{y}"}[region.y_edge]
-            attrs['tts:position'] = f"{hor} {ver}"
+            attrs['tts:position'] = _position_value(region)
         if region.width is not None and region.height is not None:
             attrs['tts:extent'] = f"{region.width} {region.height}"
         elif region.width is not None:
@@ -170,8 +226,12 @@ def export_ttml(doc: SubtitleDocument) -> str:
                  'end': _ms_to_ttml(cue.end_ms)}
         if cue.region_id and cue.region_id != '__default__':
             attrs['region'] = cue.region_id
-        if cue.style_refs:
-            attrs['style'] = ' '.join(cue.style_refs)
+        refs = list(cue.style_refs)
+        ov_sid = ov_style_ids.get(cue.lang or doc.language or '')
+        if ov_sid:
+            refs.append(ov_sid)          # last ref wins per TTML
+        if refs:
+            attrs['style'] = ' '.join(refs)
         if cue.inline_style is not None:
             attrs.update(_style_attrs(cue.inline_style))
         if cue.source_id:
@@ -250,64 +310,102 @@ def _emit_ttml_children(parent: ET.Element, node: SpanNode):
 # WebVTT
 # --------------------------------------------------------------------------- #
 
+def _axis_pct(d: Optional[Dim], horizontal: bool,
+              default: float) -> float:
+    if d is None:
+        return default
+    if d.unit in ('%', 'vh', 'rh', 'vw', 'rw'):
+        return d.value
+    if d.unit == 'px':
+        return d.value / (1920.0 if horizontal else 1080.0) * 100.0
+    return default
+
+
+def _axis_span(edge: str, val: Optional[Dim], size: Optional[Dim],
+               horizontal: bool, size_default: float
+               ) -> Tuple[float, float]:
+    """Region span [start, start+size] along one axis, in % of canvas.
+    Handles edge/center/point anchoring (point = CSS percentage-point:
+    offset scales with canvas minus region)."""
+    s = _axis_pct(size, horizontal, size_default)
+    v = _axis_pct(val, horizontal, 0.0)
+    if edge in ('left', 'top'):
+        a = v
+    elif edge in ('right', 'bottom'):
+        a = 100.0 - v - s
+    elif edge == 'center':
+        a = v - s / 2.0 if val is not None else 50.0 - s / 2.0
+    else:                                # point
+        a = (100.0 - s) * (v / 100.0)
+    return a, s
+
+
 def _region_to_cue_settings(doc: SubtitleDocument, cue: Cue) -> str:
+    """
+    Map a region + its alignment to VTT cue settings so the text lands
+    where the renderer puts it: `line` follows the DISPLAY-ALIGNED edge
+    of the region box, `position` follows the TEXT-ALIGN point within
+    the region's horizontal span (a centered full-width band emits no
+    position at all — VTT's default centering is exactly right).
+    """
     region = doc.get_region(cue)
     spec = doc.specified_style(region.style_refs, region.style)
     parts: List[str] = []
     vertical = region.is_vertical()
+    ta = spec.text_align or 'center'
+    da = spec.display_align or ('before' if vertical else 'after')
+
     if vertical:
         parts.append('vertical:rl' if (spec.writing_mode or 'tbrl') != 'tblr'
                      else 'vertical:lr')
-
-    def pct(d: Optional[Dim], axis_default: float) -> float:
-        if d is None:
-            return axis_default
-        if d.unit == '%':
-            return d.value
-        if d.unit in ('vh', 'rh', 'vw', 'rw'):
-            return d.value
-        if d.unit == 'px':
-            base = 1080.0 if not vertical else 1920.0
-            return d.value / base * 100.0
-        return axis_default
-
-    if vertical:
-        # line: column position from the right for rl
-        x = pct(region.x, 10.0)
-        if region.x_edge == 'right':
-            parts.append(f"line:{x:g}%")
-        elif region.x_edge == 'left':
-            parts.append(f"line:{max(0.0, 100.0 - x):g}%,end")
-        y = pct(region.y, 0.0)
-        if region.y_edge == 'center':
-            parts.append(f"position:{y:g}%,center")
-        elif region.y_edge == 'bottom':
-            parts.append(f"position:{max(0.0, 100 - y):g}%,end")
-        elif y:
-            parts.append(f"position:{y:g}%")
-        if region.height is not None:
-            parts.append(f"size:{pct(region.height, 100):g}%")
-    else:
-        y = pct(region.y, 10.0)
-        if region.y_edge == 'bottom':
-            parts.append(f"line:{max(0.0, 100.0 - y):g}%,end")
-        elif region.y_edge == 'center':
-            parts.append(f"line:{y:g}%,center")
+        # line = column position measured from the writing start edge
+        x0, w = _axis_span(region.x_edge, region.x, region.width,
+                           True, 12.0)
+        rl = (spec.writing_mode or 'tbrl') != 'tblr'
+        if da == 'before':
+            edge = (x0 + w) if rl else x0
+            la = ''
+        elif da == 'center':
+            edge, la = x0 + w / 2.0, ',center'
         else:
-            parts.append(f"line:{y:g}%")
-        x = pct(region.x, 50.0)
-        if region.x_edge == 'center':
-            if abs(x - 50.0) > 0.01:
-                parts.append(f"position:{x:g}%")
-        elif region.x_edge == 'left':
-            parts.append(f"position:{x:g}%,line-left")
-        elif region.x_edge == 'right':
-            parts.append(f"position:{max(0.0, 100.0 - x):g}%,line-right")
-        if region.width is not None:
-            w = pct(region.width, 90.0)
-            if abs(w - 100.0) > 0.01:
-                parts.append(f"size:{w:g}%")
-    ta = spec.text_align
+            edge = x0 if rl else (x0 + w)
+            la = ',end'
+        line = (100.0 - edge) if rl else edge
+        parts.append(f"line:{max(0.0, min(100.0, line)):g}%{la}")
+        y0, h = _axis_span(region.y_edge, region.y, region.height,
+                           False, 100.0)
+        if ta in ('center',):
+            pos = y0 + h / 2.0
+            if abs(pos - 50.0) > 0.01:
+                parts.append(f"position:{pos:g}%,center")
+        elif ta in ('end', 'right', 'bottom'):
+            parts.append(f"position:{y0 + h:g}%,line-right")
+        else:
+            if abs(y0) > 0.01:
+                parts.append(f"position:{y0:g}%,line-left")
+        if region.height is not None:
+            parts.append(f"size:{h:g}%")
+    else:
+        y0, h = _axis_span(region.y_edge, region.y, region.height,
+                           False, 12.0)
+        if da == 'after':
+            parts.append(f"line:{max(0.0, min(100.0, y0 + h)):g}%,end")
+        elif da == 'center':
+            parts.append(f"line:{y0 + h / 2.0:g}%,center")
+        else:
+            parts.append(f"line:{max(0.0, min(100.0, y0)):g}%")
+        x0, w = _axis_span(region.x_edge, region.x, region.width,
+                           True, 90.0)
+        if ta == 'center':
+            pos = x0 + w / 2.0
+            if abs(pos - 50.0) > 0.01:
+                parts.append(f"position:{pos:g}%")
+        elif ta in ('end', 'right'):
+            parts.append(f"position:{x0 + w:g}%,line-right")
+        else:                            # start / left
+            parts.append(f"position:{x0:g}%,line-left")
+        if region.width is not None and abs(w - 100.0) > 0.01:
+            parts.append(f"size:{w:g}%")
     if ta in ('start', 'end', 'left', 'right'):
         parts.append(f"align:{ta}")
     return ' '.join(parts)
@@ -343,8 +441,10 @@ def _emit_vtt_node(node: SpanNode, doc: SubtitleDocument, out: List[str]):
                        if not r.startswith('__')]
             open_tag = ''
             if classes:
-                open_tag = 'c.' + '.'.join(c.replace('.', ' ').strip()
-                                           for c in classes)
+                # 's1.en' → classes [s1, en] → <c.s1.en>, matching the
+                # exported ::cue(.s1.en) selectors
+                cls = [p for c in classes for p in c.split('.') if p]
+                open_tag = 'c.' + '.'.join(cls)
             for t in tags:
                 out.append(f'<{t}>')
             if open_tag:
@@ -376,30 +476,54 @@ def _emit_vtt_ruby(container: SpanNode, doc: SubtitleDocument,
             out.append(_vtt_escape(child.plain_text()))
 
 
-def export_vtt(doc: SubtitleDocument) -> str:
+def _style_decls(st: Style, sizes: bool = True) -> List[str]:
+    decls = []
+    if st.color is not None:
+        decls.append(f"color: {to_hex(st.color)};")
+    if st.background_color is not None:
+        decls.append(f"background-color: {to_hex(st.background_color)};")
+    if st.font_family:
+        decls.append(f"font-family: {', '.join(st.font_family)};")
+    if st.font_style:
+        decls.append(f"font-style: {st.font_style};")
+    if st.font_weight:
+        decls.append(f"font-weight: {st.font_weight};")
+    if sizes and st.font_size is not None:
+        decls.append(f"font-size: {st.font_size};")
+    return decls
+
+
+def export_vtt(doc: SubtitleDocument, overrides=None,
+               is_hdr: bool = False) -> str:
     lines = ['WEBVTT', '']
+
+    def style_block(selector: str, decls: List[str]):
+        if not decls:
+            return
+        lines.append('STYLE')
+        lines.append(f"::cue({selector}) {{")
+        lines.extend(f"  {d}" for d in decls)
+        lines.append('}')
+        lines.append('')
+
     # STYLE blocks for exportable named styles
     for sid, st in doc.styles.items():
         if sid.startswith('__'):
             continue
-        decls = []
-        if st.color is not None:
-            decls.append(f"color: {to_hex(st.color)};")
-        if st.background_color is not None:
-            decls.append(f"background-color: {to_hex(st.background_color)};")
-        if st.font_family:
-            decls.append(f"font-family: {', '.join(st.font_family)};")
-        if st.font_style:
-            decls.append(f"font-style: {st.font_style};")
-        if st.font_weight:
-            decls.append(f"font-weight: {st.font_weight};")
-        if decls:
-            sel = '.'.join(sid.split('.'))
-            lines.append('STYLE')
-            lines.append(f"::cue(.{sel}) {{")
-            lines.extend(f"  {d}" for d in decls)
-            lines.append('}')
-            lines.append('')
+        style_block('.' + '.'.join(p for p in sid.split('.') if p),
+                    _style_decls(st, sizes=False))
+    # per-language override blocks LAST (later rules win) — matched by
+    # the lang-<code> class every cue payload is wrapped in
+    langs = sorted({(c.lang or doc.language or '') for c in doc.cues})
+    ov_langs = set()
+    if overrides is not None:
+        for lang in langs:
+            st = _override_style(overrides, lang, is_hdr)
+            if st is None:
+                continue
+            style_block(f'.lang-{lang or "und"}', _style_decls(st))
+            ov_langs.add(lang)
+
     for i, cue in enumerate(doc.sorted_cues(), 1):
         settings = _region_to_cue_settings(doc, cue)
         lines.append(str(cue.source_id or i))
@@ -409,7 +533,20 @@ def export_vtt(doc: SubtitleDocument) -> str:
             ts += ' ' + settings
         lines.append(ts)
         buf: List[str] = []
+        # cue-level classes: named refs + the language class, so the
+        # ::cue selectors above actually match
+        cls: List[str] = []
+        lang = cue.lang or doc.language or ''
+        if lang in ov_langs:
+            cls.append(f'lang-{lang or "und"}')
+        for r in cue.style_refs:
+            if not r.startswith('__'):
+                cls += [p for p in r.split('.') if p]
+        if cls:
+            buf.append('<c.' + '.'.join(dict.fromkeys(cls)) + '>')
         _emit_vtt_node(cue.root, doc, buf)
+        if cls:
+            buf.append('</c>')
         lines.append(''.join(buf).strip('\n'))
         lines.append('')
     return '\n'.join(lines)
@@ -464,8 +601,16 @@ def _emit_srt_node(node: SpanNode, doc: SubtitleDocument, out: List[str]):
             out.append(post)
 
 
-def export_srt(doc: SubtitleDocument) -> str:
+def export_srt(doc: SubtitleDocument, overrides=None,
+               is_hdr: bool = False) -> str:
     out: List[str] = []
+    # per-language override color (SRT can express color, not size)
+    ov_color: Dict[str, str] = {}
+    if overrides is not None:
+        for lang in {(c.lang or doc.language or '') for c in doc.cues}:
+            st = _override_style(overrides, lang, is_hdr)
+            if st is not None and st.color is not None:
+                ov_color[lang] = to_hex(st.color, False)
     for i, cue in enumerate(doc.sorted_cues(), 1):
         out.append(str(i))
         out.append(f"{format_srt_timestamp(cue.begin_ms)} --> "
@@ -484,7 +629,12 @@ def export_srt(doc: SubtitleDocument) -> str:
                                  else 'center'), 2)
         if an != 2:
             buf.append(f"{{\\an{an}}}")
+        col = ov_color.get(cue.lang or doc.language or '')
+        if col:
+            buf.append(f'<font color="{col}">')
         _emit_srt_node(cue.root, doc, buf)
+        if col:
+            buf.append('</font>')
         out.append(''.join(buf).strip('\n'))
         out.append('')
     return '\n'.join(out)
