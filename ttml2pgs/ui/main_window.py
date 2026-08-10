@@ -29,6 +29,12 @@ from ..core.pipeline import RenderSettings
 from ..core.project import save_project
 from .preferences import PreferencesDialog
 from .state import AppState, DocumentSession
+from .undo import UndoManager
+
+#: per-file settings covered by undo (the 'meta' scope)
+_META_FIELDS = ('video_path', 'video_info', 'offset_ms', 'manual_src_fps',
+                'manual_dst_fps', 'use_manual_conform', 'out_path',
+                'track_name')
 from .widgets.cue_editor import SelectedCuePane
 from .widgets.cue_table import CuePane
 from .widgets.preview import PreviewPane
@@ -51,6 +57,7 @@ class MainWindow(QMainWindow):
 
         self.state = AppState()
         self.state.load_settings()
+        self.undo_mgr = UndoManager()
 
         self.queue = QueueManager(state_path=self.state.queue_state_path)
         self.queue.on_change = self.queue_changed.emit
@@ -171,6 +178,15 @@ class MainWindow(QMainWindow):
         m_file.addSeparator()
         act(m_file, 'E&xit', self.close, 'Ctrl+Q')
 
+        m_edit = self.menuBar().addMenu('&Edit')
+        self.act_undo = act(m_edit, '&Undo', self._undo, 'Ctrl+Z')
+        self.act_redo = QAction('&Redo', self)
+        self.act_redo.setShortcuts([QKeySequence('Ctrl+Shift+Z'),
+                                    QKeySequence('Ctrl+Y')])
+        self.act_redo.triggered.connect(self._redo)
+        m_edit.addAction(self.act_redo)
+        m_edit.aboutToShow.connect(self._sync_edit_menu)
+
         m_render = self.menuBar().addMenu('&Render')
         act(m_render, 'Add &current file to queue', self._render_current,
             'F5')
@@ -214,6 +230,7 @@ class MainWindow(QMainWindow):
     # Session handling
     # ------------------------------------------------------------------ #
     def _activate_session(self, index: int):
+        self._ensure_undo_shadows()
         sess = self.state.active
         if sess is None:
             self.cue_pane.set_document(None)
@@ -222,10 +239,16 @@ class MainWindow(QMainWindow):
             self.preview_pane.clear_context()
             self.setWindowTitle('TTML2PGS 2 — direct-render subtitle studio')
             return
+        # boundary: shadow tracks the activated doc (covers reloads too)
+        self.undo_mgr.refresh(('doc', sess),
+                              lambda: self._undo_snapshot(('doc', sess)))
         self.cue_pane.set_document(sess.doc)
         self.settings_pane.set_document(sess.doc)
-        # a (disabled) override tab for every open language
+        # a (disabled) override tab for every open language; the silent
+        # auto-add must not leak into the next override undo step
         self.settings_pane.ensure_language_tabs(self.state.languages_open())
+        self.undo_mgr.refresh(('ov',),
+                              lambda: self._undo_snapshot(('ov',)))
         self._push_preview_context(sess)
         if sess.last_cue_uid is not None:
             self.cue_pane.select_cue_uid(sess.last_cue_uid)
@@ -243,6 +266,9 @@ class MainWindow(QMainWindow):
             is_hdr=bool(sess.video_info and sess.video_info.is_hdr))
 
     def _session_changed(self, row: int):
+        if 0 <= row < len(self.state.sessions):
+            s = self.state.sessions[row]
+            self._undo_record(('meta', s), 'file setting change')
         sess = self.state.active
         if sess is not None and row == self.state.active_index:
             self._push_preview_context(sess)
@@ -262,6 +288,7 @@ class MainWindow(QMainWindow):
         sess = self.state.active
         if sess:
             sess.dirty = True
+            self._undo_record(('doc', sess), 'cue style edit')
         if self.sel_cue_pane.cue is not None:
             self.cue_pane.refresh_cue(self.sel_cue_pane.cue)
         self.preview_pane.schedule_render()
@@ -271,6 +298,7 @@ class MainWindow(QMainWindow):
         sess = self.state.active
         if sess:
             sess.dirty = True
+            self._undo_record(('doc', sess), 'cue edit')
         self.preview_pane.schedule_render()
 
     def _doc_edited(self):
@@ -278,6 +306,7 @@ class MainWindow(QMainWindow):
         sess = self.state.active
         if sess:
             sess.dirty = True
+            self._undo_record(('doc', sess), 'style/region edit')
         self.cue_pane.refresh()
         self.cue_pane.refresh_regions()
         self.preview_pane.schedule_render()
@@ -293,6 +322,7 @@ class MainWindow(QMainWindow):
         self._overrides_edited()
 
     def _overrides_edited(self):
+        self._undo_record(('ov',), 'override/profile change')
         self.state.save_settings()
         # keep the queue's live option in step with the settings pane
         self.queue.move_to_subs = self.state.settings.get(
@@ -314,6 +344,123 @@ class MainWindow(QMainWindow):
     def _autosave(self):
         self.state.save_settings()
         self.state.save_session()
+
+    # ------------------------------------------------------------------ #
+    # Undo / redo (Ctrl+Z / Ctrl+Shift+Z) — snapshot-based, app-wide
+    # ------------------------------------------------------------------ #
+    def _undo_snapshot(self, key):
+        if key[0] == 'doc':
+            return copy.deepcopy(key[1].doc)
+        if key[0] == 'meta':
+            return {f: copy.deepcopy(getattr(key[1], f))
+                    for f in _META_FIELDS}
+        return copy.deepcopy(self.state.overrides)
+
+    def _ensure_undo_shadows(self):
+        """Pre-images for every open file + the overrides; drops stack
+        entries whose file has been closed."""
+        live = {('ov',)}
+        for s in self.state.sessions:
+            live.add(('doc', s))
+            live.add(('meta', s))
+        for key in live:
+            self.undo_mgr.ensure(key, lambda k=key: self._undo_snapshot(k))
+        self.undo_mgr.prune(live)
+
+    def _undo_record(self, key, label: str):
+        self._ensure_undo_shadows()
+        self.undo_mgr.record(key, lambda: self._undo_snapshot(key), label)
+
+    def _text_widget_undo(self, redo: bool = False) -> bool:
+        """Ctrl+Z while typing in a text field stays a TEXT undo."""
+        from PyQt6.QtWidgets import (QApplication, QLineEdit,
+                                     QPlainTextEdit, QTextEdit)
+        w = QApplication.focusWidget()
+        if isinstance(w, QLineEdit):
+            if redo and w.isRedoAvailable():
+                w.redo()
+                return True
+            if not redo and w.isUndoAvailable():
+                w.undo()
+                return True
+        if isinstance(w, (QTextEdit, QPlainTextEdit)):
+            doc = w.document()
+            if redo and doc.isRedoAvailable():
+                w.redo()
+                return True
+            if not redo and doc.isUndoAvailable():
+                w.undo()
+                return True
+        return False
+
+    def _undo(self):
+        if self._text_widget_undo(redo=False):
+            return
+        got = self.undo_mgr.undo(self._undo_snapshot)
+        if got is None:
+            self.statusBar().showMessage('Nothing to undo', 3000)
+            return
+        key, label, snapshot = got
+        self._apply_undo_state(key, snapshot)
+        self.statusBar().showMessage(f'Undid: {label}', 4000)
+
+    def _redo(self):
+        if self._text_widget_undo(redo=True):
+            return
+        got = self.undo_mgr.redo(self._undo_snapshot)
+        if got is None:
+            self.statusBar().showMessage('Nothing to redo', 3000)
+            return
+        key, label, snapshot = got
+        self._apply_undo_state(key, snapshot)
+        self.statusBar().showMessage(f'Redid: {label}', 4000)
+
+    def _apply_undo_state(self, key, snapshot):
+        kind = key[0]
+        if kind == 'ov':
+            # same in-place adopt as applying a .t2p's overrides
+            self.state.overrides.adopt(snapshot)
+            self.settings_pane._rebuild_lang_tabs()
+            self.settings_pane.layout_editor._load()
+            dlg = getattr(self, '_pref_dialog', None)
+            if dlg is not None:
+                dlg._reload_profiles()
+            self.state.save_settings()
+            self.preview_pane.schedule_render()
+        else:
+            sess = key[1]
+            if sess not in self.state.sessions:
+                return
+            if kind == 'meta':
+                for f, v in snapshot.items():
+                    setattr(sess, f, v)
+                sess.dirty = True
+                self.sources_pane.refresh()
+                if sess is self.state.active:
+                    self._push_preview_context(sess)
+            else:                                    # 'doc'
+                sess.doc = snapshot
+                sess.dirty = True
+                if sess is not self.state.active:
+                    # jump to the file the change belongs to
+                    self.state.active_index = \
+                        self.state.sessions.index(sess)
+                    self.sources_pane.refresh()
+                    self._activate_session(self.state.active_index)
+                else:
+                    self.cue_pane.set_document(sess.doc)
+                    self.settings_pane.set_document(sess.doc)
+                    self.settings_pane.ensure_language_tabs(
+                        self.state.languages_open())
+                    self._push_preview_context(sess)
+                    if sess.last_cue_uid is not None:
+                        self.cue_pane.select_cue_uid(sess.last_cue_uid)
+        self.undo_mgr.refresh(key, lambda: self._undo_snapshot(key))
+
+    def _sync_edit_menu(self):
+        ul, rl = self.undo_mgr.undo_label(), self.undo_mgr.redo_label()
+        self.act_undo.setText(f'&Undo {ul}' if ul else '&Undo')
+        self.act_redo.setText(f'&Redo {rl}' if rl else '&Redo')
 
     # ------------------------------------------------------------------ #
     # Rendering / queueing

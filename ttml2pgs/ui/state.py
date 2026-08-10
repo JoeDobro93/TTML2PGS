@@ -26,9 +26,9 @@ def config_dir() -> str:
     return d
 
 
-@dataclass
-class DocumentSession:
-    """One open subtitle + its render target configuration."""
+@dataclass(eq=False)                    # identity semantics: sessions are
+class DocumentSession:                  # unique objects (and hashable —
+    """One open subtitle + its render target configuration."""  # undo keys)
     doc: SubtitleDocument
     sub_path: str
     video_path: Optional[str] = None

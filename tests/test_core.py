@@ -1079,6 +1079,52 @@ class TestExportFidelity(unittest.TestCase):
         # the mode radios and the direction radios are separate groups
         self.assertTrue(dlg.rb_shift.isChecked())
 
+    def test_timecode_overtype(self):
+        """Round 25: typing digits into the timecode REPLACES digits at
+        the cursor Subtitle-Edit style — from 00:00:00.000, cursor
+        between the minute digits, typing 12345 → 00:01:23.450 — and
+        the HH:MM:SS.mmm mask never breaks."""
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import QEvent, Qt, QTime
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.cue_table import TimecodeEdit
+
+        def type_digits(w, digits):
+            for ch in digits:
+                w.keyPressEvent(QKeyEvent(
+                    QEvent.Type.KeyPress, ord(ch),
+                    Qt.KeyboardModifier.NoModifier, ch))
+
+        w = TimecodeEdit()
+        w.setTime(QTime(0, 0, 0, 0))
+        w.lineEdit().setCursorPosition(4)      # between the minute digits
+        type_digits(w, '12345')
+        self.assertEqual(w.time(), QTime(0, 1, 23, 450))
+        self.assertEqual(w.lineEdit().text(), '00:01:23.450')
+
+        # typing from the start overwrites leftmost digits
+        w.lineEdit().setCursorPosition(0)
+        type_digits(w, '01')
+        self.assertEqual(w.time(), QTime(1, 1, 23, 450))
+
+        # out-of-range minutes clamp instead of breaking the mask
+        w.setTime(QTime(0, 0, 0, 0))
+        w.lineEdit().setCursorPosition(3)      # tens-of-minutes digit
+        type_digits(w, '7')
+        self.assertEqual(w.time(), QTime(0, 59, 0, 0))
+
+        # typing at the very end does nothing (no digit slot right of it)
+        w.setTime(QTime(0, 0, 1, 0))
+        w.lineEdit().setCursorPosition(12)
+        type_digits(w, '9')
+        self.assertEqual(w.time(), QTime(0, 0, 1, 0))
+
     def test_close_popout_before_dialogs(self):
         """Round 23: any dialog first closes the (stay-on-top) pop-out
         so it can't sit in front of / block the new window."""
@@ -1154,6 +1200,116 @@ class TestExportFidelity(unittest.TestCase):
             self.assertIs(live.layout, layout_obj)      # identity kept
             self.assertIn('en', live.by_lang)
             self.assertEqual(str(live.by_lang['en'].font_size), '2.75vh')
+
+
+class TestUndoManager(unittest.TestCase):
+    """Round 25: snapshot undo/redo core — burst coalescing, redo,
+    limits and closed-file pruning (no Qt needed)."""
+
+    def _mgr(self, **kw):
+        from ttml2pgs.ui.undo import UndoManager
+        self.t = [0.0]
+        kw.setdefault('coalesce_ms', 500)
+        return UndoManager(clock=lambda: self.t[0], **kw)
+
+    def test_record_undo_redo_roundtrip(self):
+        m = self._mgr()
+        state = {'v': 0}
+        KEY = ('doc', 'a')
+        snap = lambda: dict(state)          # noqa: E731
+        cur = lambda k: dict(state)         # noqa: E731
+        m.ensure(KEY, snap)
+
+        state['v'] = 1
+        self.t[0] = 1.0
+        m.record(KEY, snap, 'edit A')       # new burst → pushes v0
+        state['v'] = 2
+        self.t[0] = 1.3
+        m.record(KEY, snap, 'edit A')       # same burst → coalesced
+        state['v'] = 3
+        self.t[0] = 9.0
+        m.record(KEY, snap, 'edit B')       # new burst → pushes v2
+
+        self.assertEqual(m.undo_label(), 'edit B')
+        key, label, snapshot = m.undo(cur)
+        self.assertEqual(snapshot, {'v': 2})    # back to burst-1 end
+        state.update(snapshot)
+        m.refresh(KEY, snap)
+
+        key, label, snapshot = m.undo(cur)
+        self.assertEqual(snapshot, {'v': 0})    # back to the beginning
+        state.update(snapshot)
+        m.refresh(KEY, snap)
+        self.assertIsNone(m.undo(cur))          # stack exhausted
+
+        # redo walks forward again: v2, then v3
+        key, label, snapshot = m.redo(cur)
+        self.assertEqual(snapshot, {'v': 2})
+        state.update(snapshot)
+        m.refresh(KEY, snap)
+        key, label, snapshot = m.redo(cur)
+        self.assertEqual(snapshot, {'v': 3})
+        state.update(snapshot)
+        m.refresh(KEY, snap)
+        self.assertIsNone(m.redo(cur))
+
+        # ...and undo still works after redoing
+        key, label, snapshot = m.undo(cur)
+        self.assertEqual(snapshot, {'v': 2})
+
+    def test_new_edit_clears_redo(self):
+        m = self._mgr()
+        state = {'v': 0}
+        KEY = ('doc', 'a')
+        snap = lambda: dict(state)          # noqa: E731
+        cur = lambda k: dict(state)         # noqa: E731
+        m.ensure(KEY, snap)
+        state['v'] = 1
+        self.t[0] = 1.0
+        m.record(KEY, snap, 'e1')
+        _, _, s = m.undo(cur)
+        state.update(s)
+        m.refresh(KEY, snap)
+        self.assertEqual(m.redo_label(), 'e1')
+        state['v'] = 5
+        self.t[0] = 9.0
+        m.record(KEY, snap, 'e2')           # diverged: redo history gone
+        self.assertIsNone(m.redo_label())
+
+    def test_limit_and_prune(self):
+        m = self._mgr(limit=3)
+        state = {'v': 0}
+        KEY = ('doc', 'a')
+        snap = lambda: dict(state)          # noqa: E731
+        m.ensure(KEY, snap)
+        for i in range(1, 6):               # 5 separated edits, keep 3
+            state['v'] = i
+            self.t[0] = i * 10.0
+            m.record(KEY, snap, f'e{i}')
+        self.assertEqual(len(m._undo), 3)
+        self.assertEqual(m._undo[0][2], {'v': 2})   # oldest kept pre-image
+        # closing the file drops its history
+        m.prune({('ov',)})
+        self.assertIsNone(m.undo_label())
+
+    def test_per_key_isolation(self):
+        m = self._mgr()
+        a, b = {'v': 0}, {'w': 0}
+        KA, KB = ('doc', 'a'), ('meta', 'a')
+        m.ensure(KA, lambda: dict(a))
+        m.ensure(KB, lambda: dict(b))
+        a['v'] = 1
+        self.t[0] = 1.0
+        m.record(KA, lambda: dict(a), 'doc edit')
+        b['w'] = 1
+        self.t[0] = 1.2                     # <coalesce window, OTHER key
+        m.record(KB, lambda: dict(b), 'meta edit')
+        # different keys never coalesce; last-in-first-out order
+        self.assertEqual(m.undo_label(), 'meta edit')
+        key, _, snapshot = m.undo(lambda k: dict(b))
+        self.assertEqual((key, snapshot), (KB, {'w': 0}))
+        key, _, snapshot = m.undo(lambda k: dict(a))
+        self.assertEqual((key, snapshot), (KA, {'v': 0}))
 
 
 class TestPipelineAndQueue(unittest.TestCase):

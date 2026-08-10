@@ -907,6 +907,43 @@ class CuePane(QWidget):
         self.cues_changed.emit()
 
 
+class TimecodeEdit(QTimeEdit):
+    """HH:mm:ss.zzz spinner with Subtitle-Edit-style overtype: typed
+    digits REPLACE the digit at the cursor and flow rightward across
+    the fixed mask (separators are skipped automatically), so from
+    00:00:00.000, clicking between the minute digits and typing 12345
+    yields 00:01:23.450 — no backspacing needed. Out-of-range fields
+    clamp (minutes/seconds to 59, hours to 23)."""
+
+    _SLOTS = (0, 1, 3, 4, 6, 7, 9, 10, 11)     # digit indices in the text
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDisplayFormat('HH:mm:ss.zzz')
+
+    def keyPressEvent(self, ev):
+        ch = ev.text()
+        le = self.lineEdit()
+        if ch.isdigit() and le is not None and len(le.text()) == 12:
+            pos = (le.selectionStart() if le.hasSelectedText()
+                   else le.cursorPosition())
+            slot = next((p for p in self._SLOTS if p >= pos), None)
+            if slot is None:
+                return              # cursor at the end: nothing to type over
+            chars = list(le.text())
+            chars[slot] = ch
+            self.setTime(QTime(
+                min(int(''.join(chars[0:2])), 23),
+                min(int(''.join(chars[3:5])), 59),
+                min(int(''.join(chars[6:8])), 59),
+                int(''.join(chars[9:12]))))
+            le.deselect()
+            le.setCursorPosition(
+                next((p for p in self._SLOTS if p > slot), 12))
+            return
+        super().keyPressEvent(ev)
+
+
 class TimeToolsDialog(QDialog):
     """Shift by amount (all / selected / after selected) or fps conform."""
 
@@ -922,12 +959,12 @@ class TimeToolsDialog(QDialog):
         self.shift_box = QWidget()          # one widget so the whole
         form = QFormLayout(self.shift_box)  # section greys together
         form.setContentsMargins(24, 0, 0, 0)
-        self.time_amount = QTimeEdit()
-        self.time_amount.setDisplayFormat('HH:mm:ss.zzz')
+        self.time_amount = TimecodeEdit()
         self.time_amount.setTime(QTime(0, 0, 0, 0))
         self.time_amount.setToolTip(
-            'Click a field (hours/minutes/seconds/ms) and use the '
-            'arrows, wheel or type. Direction is picked below.')
+            'Type digits to overwrite from the cursor (Subtitle Edit '
+            'style), or use the arrows/wheel per field. Direction is '
+            'picked below.')
         form.addRow('Hour:min:sec.ms:', self.time_amount)
         dir_row = QHBoxLayout()
         self.rb_later = QRadioButton('Later  (+)')
