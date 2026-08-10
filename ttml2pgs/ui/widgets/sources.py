@@ -11,17 +11,98 @@ from typing import List, Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
-from PyQt6.QtWidgets import (QAbstractItemView, QFileDialog, QHBoxLayout,
-                             QHeaderView, QLabel, QMenu, QPushButton,
+from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog,
+                             QDialogButtonBox, QFileDialog, QHBoxLayout,
+                             QHeaderView, QLabel, QListWidget,
+                             QListWidgetItem, QMenu, QPushButton,
                              QTableWidget, QTableWidgetItem, QVBoxLayout,
                              QWidget)
 
+from ...core.merge import (all_variants, common_variants, merge_documents,
+                           merged_out_path, plan_merge, variant_label)
 from ...core.parsers import SUBTITLE_EXTENSIONS
 from ...core.timing import fps_label
 from ..state import AppState, DocumentSession
 
 COL_NAME, COL_LANG, COL_VIDEO, COL_RES, COL_HDR, COL_SRC_FPS, COL_TGT_FPS, \
     COL_CONFORM, COL_OFFSET, COL_OUT = range(10)
+
+
+class _MergeDialog(QDialog):
+    """Pick the primary + secondary language for a batch merge.
+    Options missing from any selected episode are greyed out."""
+
+    def __init__(self, variants: List[str], common: List[str],
+                 app_settings: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Merge subtitles')
+        self.app_settings = app_settings
+        lay = QVBoxLayout(self)
+        hint = QLabel(
+            'Pick the PRIMARY language (sets the merged subtitle\'s '
+            'language, initials and mux tag) and the SECONDARY one '
+            'rendered alongside it. Greyed languages are missing from '
+            'at least one selected episode.')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color: palette(mid); font-size: 11px;')
+        lay.addWidget(hint)
+
+        row = QHBoxLayout()
+        self.lst_primary = QListWidget()
+        self.lst_secondary = QListWidget()
+        for title, lst in (('Primary', self.lst_primary),
+                           ('Secondary', self.lst_secondary)):
+            col = QVBoxLayout()
+            col.addWidget(QLabel(title))
+            col.addWidget(lst)
+            w = QWidget()
+            w.setLayout(col)
+            row.addWidget(w)
+            for v in variants:
+                item = QListWidgetItem(variant_label(v))
+                item.setData(Qt.ItemDataRole.UserRole, v)
+                if v not in common:
+                    item.setFlags(item.flags() &
+                                  ~Qt.ItemFlag.ItemIsEnabled &
+                                  ~Qt.ItemFlag.ItemIsSelectable)
+                lst.addItem(item)
+        lay.addLayout(row)
+
+        self.chk_close = QCheckBox('Close unused subtitles')
+        self.chk_close.setChecked(
+            bool(app_settings.get('merge_close_unused', True)))
+        lay.addWidget(self.chk_close)
+
+        self.btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        self.btns.accepted.connect(self.accept)
+        self.btns.rejected.connect(self.reject)
+        lay.addWidget(self.btns)
+
+        self.lst_primary.itemSelectionChanged.connect(self._validate)
+        self.lst_secondary.itemSelectionChanged.connect(self._validate)
+        self._validate()
+
+    def _sel(self, lst) -> str:
+        items = lst.selectedItems()
+        return items[0].data(Qt.ItemDataRole.UserRole) if items else ''
+
+    def _validate(self):
+        p, s = self._sel(self.lst_primary), self._sel(self.lst_secondary)
+        self.btns.button(
+            QDialogButtonBox.StandardButton.Ok).setEnabled(
+            bool(p) and bool(s) and p != s)
+
+    def accept(self):
+        self.app_settings['merge_close_unused'] = \
+            self.chk_close.isChecked()
+        super().accept()
+
+    def choice(self):
+        return (self._sel(self.lst_primary),
+                self._sel(self.lst_secondary),
+                self.chk_close.isChecked())
 
 
 def _parse_fps(text: str):
@@ -61,10 +142,18 @@ class SourcesPane(QWidget):
         b_folder = QPushButton('Add folder…')
         b_sup = QPushButton('Queue external .sup…')
         b_close = QPushButton('Close selected')
+        b_merge = QPushButton('Merge selected…')
+        b_merge.setToolTip(
+            'Merge two languages per episode into ONE subtitle (e.g. '
+            'Japanese dialogue + English forced signs). Highlight any '
+            'file of each episode you want merged — every open file of '
+            'those episodes is considered, and you pick the primary + '
+            'secondary language once for the whole batch.')
         bar.addWidget(b_add)
         bar.addWidget(b_folder)
         bar.addWidget(b_sup)
         bar.addWidget(b_close)
+        bar.addWidget(b_merge)
         bar.addStretch()
         from PyQt6.QtWidgets import QCheckBox
         self.chk_selected_only = QCheckBox('Only checked cues')
@@ -111,6 +200,7 @@ class SourcesPane(QWidget):
         b_folder.clicked.connect(self._add_folder)
         b_sup.clicked.connect(self._add_external_sup)
         b_close.clicked.connect(self._close_selected)
+        b_merge.clicked.connect(self._merge_selected)
         self.b_render.clicked.connect(self._render_selected)
         self.b_render_all.clicked.connect(self.render_all_requested.emit)
         self.table.currentCellChanged.connect(self._row_changed)
@@ -206,22 +296,57 @@ class SourcesPane(QWidget):
         exts = ' '.join(f'*{e}' for e in SUBTITLE_EXTENSIONS) + ' *.t2p'
         paths, _ = QFileDialog.getOpenFileNames(
             self, 'Open subtitles', '', f'Subtitles ({exts})')
+        batch = {'all': None}
         for p in paths:
-            self._open(p)
+            self._open(p, batch)
 
     def _add_folder(self):
         folder = QFileDialog.getExistingDirectory(self, 'Add folder')
         if not folder:
             return
+        batch = {'all': None}
         for fn in sorted(os.listdir(folder)):
             if fn.lower().endswith(SUBTITLE_EXTENSIONS):
-                self._open(os.path.join(folder, fn))
+                self._open(os.path.join(folder, fn), batch)
 
-    def _open(self, path: str):
+    def _open(self, path: str, batch: Optional[dict] = None):
+        from PyQt6.QtWidgets import QCheckBox, QMessageBox
+        # same FILE NAME already open (any folder)? confirm a reload
+        # instead of loading it twice
+        idx = self.state.find_session_by_name(path)
+        if idx >= 0:
+            choice = batch.get('all') if batch else None
+            if choice is None:
+                box = QMessageBox(self)
+                box.setWindowTitle('Subtitle already open')
+                box.setText(f"'{os.path.basename(path)}' is already "
+                            f"open.\nReload it? (The open copy — "
+                            f"including any edits — is replaced.)")
+                box.setStandardButtons(QMessageBox.StandardButton.Ok |
+                                       QMessageBox.StandardButton.Cancel)
+                box.button(QMessageBox.StandardButton.Ok).setText('Reload')
+                box.button(QMessageBox.StandardButton.Cancel).setText(
+                    "Don't reopen")
+                chk = QCheckBox('Do this for all')
+                if batch is not None:
+                    box.setCheckBox(chk)
+                r = box.exec()
+                choice = (r == QMessageBox.StandardButton.Ok)
+                if batch is not None and chk.isChecked():
+                    batch['all'] = choice
+            if choice:
+                try:
+                    self.state.reload_session(idx, path)
+                except Exception as e:
+                    QMessageBox.warning(self, 'Open failed',
+                                        f'{path}\n\n{e}')
+                    return
+                self.refresh()
+                self.session_activated.emit(self.state.active_index)
+            return
         try:
             self.state.open_subtitle(path)
         except Exception as e:
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, 'Open failed', f'{path}\n\n{e}')
             return
         self.refresh()
@@ -258,6 +383,71 @@ class SourcesPane(QWidget):
     def _render_selected(self):
         for row in self._selected_rows():
             self.render_requested.emit(row)
+
+    # ------------------------------------------------------------------ #
+    # Merge mode
+    # ------------------------------------------------------------------ #
+    def _merge_selected(self):
+        from PyQt6.QtWidgets import QMessageBox
+        rows = self._selected_rows()
+        sel = [self.state.sessions[r] for r in rows
+               if not self.state.sessions[r].merged_from]
+        if not sel:
+            QMessageBox.information(
+                self, 'Merge', 'Highlight at least one subtitle of each '
+                'episode you want merged.')
+            return
+        pool = [(s.sub_path, s.doc.language) for s in self.state.sessions
+                if not s.merged_from]
+        groups = plan_merge(pool, [s.sub_path for s in sel])
+        common = common_variants(groups)
+        if len(common) < 2:
+            per = '\n'.join(
+                f"• {stem}: " + ', '.join(variant_label(v) for v in vs)
+                for stem, vs in groups.items())
+            QMessageBox.warning(
+                self, 'Merge',
+                'The languages don\'t all work out — fewer than two '
+                'language options are present in EVERY selected '
+                'episode:\n\n' + per)
+            return
+        dlg = _MergeDialog(all_variants(groups), common,
+                           self.state.settings, self)
+        if not dlg.exec():
+            return
+        prim, sec, close_unused = dlg.choice()
+
+        to_close: List[str] = []
+        first_merged: Optional[DocumentSession] = None
+        for stem, variants in groups.items():
+            p_path, s_path = variants[prim], variants[sec]
+            p_sess = next(s for s in self.state.sessions
+                          if s.sub_path == p_path)
+            s_sess = next(s for s in self.state.sessions
+                          if s.sub_path == s_path)
+            p_sess.doc = merge_documents(
+                p_sess.doc, s_sess.doc, prim, sec)
+            p_sess.merged_from = [os.path.basename(p_path),
+                                  os.path.basename(s_path)]
+            p_sess.out_path = merged_out_path(
+                p_path, p_sess.video_path, prim, sec)
+            p_sess.dirty = True
+            to_close.append(s_path)
+            if close_unused:
+                to_close += [p for v, p in variants.items()
+                             if v not in (prim, sec)]
+            if first_merged is None:
+                first_merged = p_sess
+        for path in to_close:
+            i = next((i for i, s in enumerate(self.state.sessions)
+                      if s.sub_path == path and not s.merged_from), -1)
+            if i >= 0:
+                self.state.close_session(i)
+        if first_merged is not None:
+            self.state.active_index = self.state.sessions.index(
+                first_merged)
+        self.refresh()
+        self.session_activated.emit(self.state.active_index)
 
     # ------------------------------------------------------------------ #
     def _row_changed(self, row, col, prow, pcol):
@@ -309,8 +499,11 @@ class SourcesPane(QWidget):
             lang = item.text().strip()
             if lang:
                 sess.doc.language = lang
-                for cue in sess.doc.cues:
-                    cue.lang = lang
+                if not sess.merged_from:
+                    # merged docs keep per-cue source languages — only
+                    # the document (mux/profile) language changes
+                    for cue in sess.doc.cues:
+                        cue.lang = lang
                 self.session_changed.emit(row)
         elif col == COL_OUT:
             name = item.text().strip()

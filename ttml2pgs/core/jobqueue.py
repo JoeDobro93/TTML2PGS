@@ -217,6 +217,23 @@ class QueueManager:
                         lang=lang or (doc.language if doc else ''),
                         track_name=track_name, started=start)
         with self._lock:
+            # re-queuing the same output REPLACES the old job (settings
+            # may have changed) instead of piling up duplicates
+            norm = os.path.normcase(os.path.abspath(settings.out_path)) \
+                if settings.out_path else None
+            if norm:
+                for g in self.groups:
+                    for old in list(g.render_jobs):
+                        if not old.settings.out_path:
+                            continue
+                        if os.path.normcase(os.path.abspath(
+                                old.settings.out_path)) != norm:
+                            continue
+                        if old.state == JobState.RUNNING and old.pipeline:
+                            old.pipeline.cancel_event.set()
+                            old.pipeline.pause_event.set()
+                        g.render_jobs.remove(old)
+                self._prune_empty_groups()
             group = self._group_for_video(video_path)
             group.render_jobs.append(job)
             if group.mux_state.is_terminal():

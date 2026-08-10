@@ -343,6 +343,7 @@ class CueFilterProxy(QSortFilterProxyModel):
         self.text = ''
         self.region_value: Optional[str] = None    # '(default)' | region id
         self.style_value: Optional[str] = None     # 'default' | style id
+        self.lang_value: Optional[str] = None      # merged docs: cue.lang
 
     def set_text(self, text: str):
         self.text = text.lower()
@@ -356,11 +357,20 @@ class CueFilterProxy(QSortFilterProxyModel):
         self.style_value = value
         self.invalidateFilter()
 
+    def set_lang_value(self, value: Optional[str]):
+        self.lang_value = value
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, row, parent):
         model: CueModel = self.sourceModel()
         cue = model.cue_at(row)
         if cue is None:
             return False
+        if self.lang_value:
+            doc = getattr(model, 'doc', None)
+            lang = cue.lang or (doc.language if doc else '')
+            if lang != self.lang_value:
+                return False
         if self.region_value is not None:
             rid = cue.region_id or '(default)'
             if rid != self.region_value:
@@ -406,7 +416,19 @@ class CuePane(QWidget):
         self.btn_time = QPushButton('Time tools…')
         self.btn_check = QPushButton('Check all')
         self.btn_uncheck = QPushButton('Uncheck all')
-        for w in (self.txt_filter, self.btn_add,
+        # merged-document tools (visible only when cues span languages)
+        self.cmb_lang = QComboBox()
+        self.cmb_lang.setToolTip('Filter cues by source language '
+                                 '(merged subtitles)')
+        self.cmb_lang.setVisible(False)
+        self.btn_snap = QPushButton('Snap timestamps…')
+        self.btn_snap.setToolTip(
+            'Align secondary-language cue edges to the primary '
+            'language\'s cue boundaries within a threshold (merged '
+            'subtitles).')
+        self.btn_snap.setVisible(False)
+        for w in (self.txt_filter, self.cmb_lang, self.btn_snap,
+                  self.btn_add,
                   self.btn_dup, self.btn_del, self.btn_time,
                   self.btn_check, self.btn_uncheck):
             bar.addWidget(w)
@@ -451,6 +473,8 @@ class CuePane(QWidget):
         self.btn_time.clicked.connect(self.open_time_tools)
         self.btn_check.clicked.connect(lambda: self.set_all_checked(True))
         self.btn_uncheck.clicked.connect(lambda: self.set_all_checked(False))
+        self.cmb_lang.currentTextChanged.connect(self._lang_filter_changed)
+        self.btn_snap.clicked.connect(self._snap_timestamps)
         self.model.cue_edited.connect(self._on_edit)
 
     # ------------------------------------------------------------------ #
@@ -459,6 +483,7 @@ class CuePane(QWidget):
         self.model.set_document(doc)
         self._set_col_filter(COL_REGION, None)
         self._set_col_filter(COL_STYLE, None)
+        self._sync_lang_tools()
         sel = self.table.selectionModel()
         if sel:
             try:
@@ -468,6 +493,58 @@ class CuePane(QWidget):
             sel.selectionChanged.connect(self._on_selection)
         if self.model.rowCount():
             self.table.selectRow(0)
+
+    #: last snap threshold in seconds (remembered for the app run)
+    _last_snap_s = 0.5
+
+    def _doc_langs(self):
+        if self.doc is None:
+            return []
+        langs = []
+        for c in self.doc.cues:
+            l = c.lang or self.doc.language or ''
+            if l and l not in langs:
+                langs.append(l)
+        return langs
+
+    def _sync_lang_tools(self):
+        """Language filter + snap only appear for merged documents."""
+        langs = self._doc_langs()
+        multi = len(langs) > 1
+        self.cmb_lang.blockSignals(True)
+        self.cmb_lang.clear()
+        if multi:
+            self.cmb_lang.addItem('(all langs)')
+            self.cmb_lang.addItems(langs)
+        self.cmb_lang.blockSignals(False)
+        self.cmb_lang.setVisible(multi)
+        self.btn_snap.setVisible(multi)
+        self.proxy.set_lang_value(None)
+
+    def _lang_filter_changed(self, text: str):
+        self.proxy.set_lang_value(
+            None if (not text or text.startswith('(')) else text)
+
+    def _snap_timestamps(self):
+        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        from ...core.merge import snap_secondary_timestamps
+        if self.doc is None:
+            return
+        val, ok = QInputDialog.getDouble(
+            self, 'Snap timestamps',
+            f'Align secondary-language cue edges to the primary '
+            f'({self.doc.language}) cue boundaries.\n'
+            f'Threshold (seconds):',
+            CuePane._last_snap_s, 0.05, 10.0, 2)
+        if not ok:
+            return
+        CuePane._last_snap_s = val
+        n = snap_secondary_timestamps(self.doc, self.doc.language,
+                                      val * 1000.0)
+        self.model.refresh_order()
+        self.cues_changed.emit()
+        QMessageBox.information(self, 'Snap timestamps',
+                                f'{n} cue(s) adjusted.')
 
     def refresh(self):
         self.model.refresh_order()

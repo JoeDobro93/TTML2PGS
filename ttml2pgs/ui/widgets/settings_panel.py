@@ -359,6 +359,11 @@ class OverrideEditor(QWidget):
         outer.setSpacing(0)
         self.sections: Dict[str, CollapsibleSection] = {}
 
+        # the editor must never stretch taller than its content, or the
+        # tab page keeps its expanded height when sections collapse
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Maximum)
+
         def section(name: str) -> QFormLayout:
             box = QWidget()
             form = QFormLayout(box)
@@ -1050,6 +1055,10 @@ class SettingsPane(QWidget):
         ovl = QVBoxLayout(ov_tab)
         ovl.setSpacing(4)
         self.lang_tabs = QTabWidget()
+        # height follows the (shared) section collapse state — an
+        # Expanding tab widget would keep the page tall when collapsed
+        self.lang_tabs.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.Maximum)
         self.lang_tabs.setTabsClosable(True)
         self.lang_tabs.tabCloseRequested.connect(self._close_lang_tab)
         btn_add_lang = QPushButton('+')

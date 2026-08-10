@@ -840,9 +840,10 @@ class TestPipelineAndQueue(unittest.TestCase):
     def test_pause_resume_leave_unstarted_alone(self):
         from ttml2pgs.core.jobqueue import QueueManager
         q = QueueManager(state_path=None)     # workers never started
-        s = RenderSettings(out_path='x.sup')
-        j1 = q.add_render(None, sample('basic.srt'), s, OverrideSet())
-        j2 = q.add_render(None, sample('basic.srt'), s, OverrideSet())
+        j1 = q.add_render(None, sample('basic.srt'),
+                          RenderSettings(out_path='x.sup'), OverrideSet())
+        j2 = q.add_render(None, sample('basic.srt'),
+                          RenderSettings(out_path='y.sup'), OverrideSet())
         q.start_job(j1.id)
         q.pause_all()
         q.resume_all()
@@ -1241,6 +1242,28 @@ class TestPipelineAndQueue(unittest.TestCase):
                     os.environ.pop('XDG_CONFIG_HOME', None)
                 else:
                     os.environ['XDG_CONFIG_HOME'] = old_cfg
+
+    def test_requeue_same_output_replaces(self):
+        """Queuing a subtitle whose output is already queued REPLACES
+        the old job (settings may have changed) instead of duplicating."""
+        from ttml2pgs.core.jobqueue import QueueManager
+        with tempfile.TemporaryDirectory() as td:
+            v = os.path.join(td, 'ep.mkv')
+            q = QueueManager()
+            doc = load_subtitle(sample('basic.srt'))
+            out = os.path.join(td, 'ep.en.sup')
+            q.add_render(doc, 'a.srt', RenderSettings(out_path=out),
+                         OverrideSet(), video_path=v, lang='en')
+            s2 = RenderSettings(out_path=out, offset_ms=250.0)
+            j2 = q.add_render(doc, 'a.srt', s2, OverrideSet(),
+                              video_path=v, lang='en')
+            groups = q.snapshot()
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(len(groups[0].render_jobs), 1)
+            self.assertIs(groups[0].render_jobs[0], j2)
+            self.assertEqual(groups[0].render_jobs[0].settings.offset_ms,
+                             250.0)
+            q.shutdown()
 
     def test_launcher_assets(self):
         """Standalone-launch support: the app icon exists and loads,
@@ -2245,6 +2268,212 @@ class TestPreferencesDialog(unittest.TestCase):
         dlg.close()
         self.assertNotIn('zh', ov.profiles)
         self.assertIn('', ov.profiles)          # has font_size set
+
+
+class TestMergeMode(unittest.TestCase):
+    """Round 16: merge two languages into one renderable document."""
+
+    def _vtt(self, td, name, lines):
+        p = os.path.join(td, name)
+        with open(p, 'w', encoding='utf-8') as f:
+            f.write('WEBVTT\n\n' + '\n\n'.join(lines))
+        return p
+
+    def _fixture(self, td):
+        mk = self._vtt
+        return {
+            'ja1': mk(td, 'Episode01.jp.vtt',
+                      ['00:00:02.000 --> 00:00:05.000\nこんにちは',
+                       '00:00:06.000 --> 00:00:08.000\n世界']),
+            'en1': mk(td, 'Episode01.en.vtt',
+                      ['00:00:02.000 --> 00:00:04.000\nHello']),
+            'enf1': mk(td, 'Episode01.en.forced.vtt',
+                       ['00:00:01.700 --> 00:00:03.500\nSign',
+                        '00:00:03.500 --> 00:00:05.200\nSign 2']),
+            'ja2': mk(td, 'Episode02.jp.vtt',
+                      ['00:00:02.000 --> 00:00:05.000\nテスト']),
+            'enf2': mk(td, 'Episode02.en.forced.vtt',
+                       ['00:00:02.100 --> 00:00:04.000\nS']),
+        }
+
+    def test_grouping_and_common_variants(self):
+        """Selection covers episodes; ALL open files of those episodes
+        are considered; only options present everywhere are common —
+        forced distinct from regular."""
+        from ttml2pgs.core.merge import (plan_merge, common_variants,
+                                         all_variants, variant_label)
+        with tempfile.TemporaryDirectory() as td:
+            f = self._fixture(td)
+            pool = [(p, load_subtitle(p).language) for p in f.values()]
+            groups = plan_merge(pool, [f['ja1'], f['ja2']])
+            self.assertEqual(set(groups), {'episode01', 'episode02'})
+            self.assertEqual(set(groups['episode01']),
+                             {'ja', 'en', 'en+forced'})
+            common = common_variants(groups)
+            self.assertEqual(set(common), {'ja', 'en+forced'},
+                             'en missing from ep2 → not common')
+            self.assertIn('en', all_variants(groups))
+            self.assertEqual(variant_label('en+forced'), 'en (forced)')
+
+    def test_merge_documents_structure(self):
+        """Merged doc: primary language, per-cue source langs kept,
+        secondary regions/styles suffixed, both render."""
+        from ttml2pgs.core.merge import merge_documents, merged_out_path
+        with tempfile.TemporaryDirectory() as td:
+            f = self._fixture(td)
+            p, s = load_subtitle(f['ja1']), load_subtitle(f['enf1'])
+            m = merge_documents(p, s, 'ja', 'en+forced')
+            self.assertEqual(m.language, 'ja')
+            self.assertEqual(len(m.cues), 4)
+            self.assertEqual(sorted({c.lang for c in m.cues}),
+                             ['en', 'ja'])
+            # secondary region renamed with a language suffix
+            self.assertTrue(any(r.endswith('.en') for r in m.regions),
+                            m.regions.keys())
+            # uids unique (queue/preview caching relies on it)
+            uids = [c.uid for c in m.cues]
+            self.assertEqual(len(uids), len(set(uids)))
+            out = merged_out_path(f['ja1'], None, 'ja', 'en+forced')
+            self.assertEqual(os.path.basename(out),
+                             'Episode01.ja+en.forced.sup')
+            # every merged cue renders
+            canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+            r = CueRenderer(m, canvas, OverrideSet())
+            for cue in m.cues:
+                self.assertIsNotNone(r.render_cue(cue))
+
+    def test_merge_language_specific_overrides_apply(self):
+        """Per-language override sets act on the merged doc's cues by
+        SOURCE language (the point of keeping cue.lang)."""
+        from ttml2pgs.core.merge import merge_documents
+        with tempfile.TemporaryDirectory() as td:
+            f = self._fixture(td)
+            m = merge_documents(load_subtitle(f['ja1']),
+                                load_subtitle(f['enf1']),
+                                'ja', 'en+forced')
+            ov = OverrideSet()
+            en = ov.ensure_language('en')
+            en.override_font_size = True
+            en.font_size = Dim(9.0, 'vh')
+            canvas = compute_canvas((1920, 1080), OverrideSet().layout)
+            plain = CueRenderer(m, canvas, OverrideSet())
+            sized = CueRenderer(m, canvas, ov)
+            ja_cue = next(c for c in m.cues if c.lang == 'ja')
+            en_cue = next(c for c in m.cues if c.lang == 'en')
+            self.assertEqual(plain.render_cue(ja_cue).height,
+                             sized.render_cue(ja_cue).height,
+                             'ja cues must not take the en override')
+            self.assertGreater(sized.render_cue(en_cue).height,
+                               plain.render_cue(en_cue).height * 1.5)
+
+    def test_secondary_initials_preserved(self):
+        """Secondary TTML initials survive as a style on its cues while
+        the doc initial stays the primary's."""
+        from ttml2pgs.core.merge import merge_documents
+        p = SubtitleDocument()
+        p.language = 'ja'
+        p.initial.color = (255, 255, 255, 255)
+        s = SubtitleDocument()
+        s.language = 'en'
+        s.initial.color = (255, 255, 0, 255)
+        cue = Cue(begin_ms=0, end_ms=1000)
+        node = SpanNode(kind='text', text='hi')
+        cue.root.children.append(node)
+        s.cues.append(cue)
+        m = merge_documents(p, s, 'ja', 'en')
+        self.assertEqual(m.initial.color, (255, 255, 255, 255))
+        mc = m.cues[-1]
+        self.assertTrue(mc.style_refs and
+                        mc.style_refs[0].startswith('__init.'))
+        computed = m.resolve_style(
+            [(mc.style_refs, mc.inline_style)], None, language='en')
+        self.assertEqual(computed.color, (255, 255, 0, 255))
+
+    def test_snap_secondary_timestamps_example(self):
+        """The user's canonical scenario: en starts 0.3s early → snaps
+        to the ja start; the following en cue ends 0.2s late → snaps to
+        the ja end; mid-cue edges out of range stay put."""
+        from ttml2pgs.core.merge import (merge_documents,
+                                         snap_secondary_timestamps)
+        with tempfile.TemporaryDirectory() as td:
+            f = self._fixture(td)
+            m = merge_documents(load_subtitle(f['ja1']),
+                                load_subtitle(f['enf1']),
+                                'ja', 'en+forced')
+            n = snap_secondary_timestamps(m, 'ja', 500.0)
+            self.assertEqual(n, 2)
+            sec = sorted((c for c in m.cues if c.lang == 'en'),
+                         key=lambda c: c.begin_ms)
+            self.assertEqual(sec[0].begin_ms, 2000.0)   # 1700 → ja start
+            self.assertEqual(sec[0].end_ms, 3500.0)     # no bound near
+            self.assertEqual(sec[1].begin_ms, 3500.0)   # untouched
+            self.assertEqual(sec[1].end_ms, 5000.0)     # 5200 → ja end
+            # far-away cues untouched
+            m2 = merge_documents(load_subtitle(f['ja1']),
+                                 load_subtitle(f['en1']), 'ja', 'en')
+            for c in m2.cues:
+                if c.lang == 'en':
+                    c.begin_ms, c.end_ms = 20000.0, 22000.0
+            self.assertEqual(
+                snap_secondary_timestamps(m2, 'ja', 500.0), 0)
+
+    def test_reopen_by_name(self):
+        """Same FILE NAME (any folder) can't be open twice — the state
+        finds it and reload replaces in place."""
+        from ttml2pgs.ui.state import AppState
+        with tempfile.TemporaryDirectory() as td:
+            d1 = os.path.join(td, 'a')
+            d2 = os.path.join(td, 'b')
+            os.makedirs(d1)
+            os.makedirs(d2)
+            p1 = self._vtt(d1, 'ep.vtt',
+                           ['00:00:01.000 --> 00:00:02.000\none'])
+            p2 = self._vtt(d2, 'ep.vtt',
+                           ['00:00:01.000 --> 00:00:02.000\ntwo'])
+            st = AppState()
+            st.open_subtitle(p1, auto_match=False)
+            self.assertEqual(st.find_session_by_name(p2), 0)
+            st.reload_session(0, p2)
+            self.assertEqual(len(st.sessions), 1)
+            self.assertEqual(st.sessions[0].sub_path,
+                             os.path.abspath(p2))
+            self.assertIn('two', st.sessions[0].doc.cues[0].plain_text())
+
+    def test_merge_dialog_offscreen(self):
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:
+            self.skipTest('PyQt6 not installed')
+        os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])  # noqa: F841
+        from ttml2pgs.ui.widgets.sources import _MergeDialog
+
+        settings = {}
+        dlg = _MergeDialog(['ja', 'en', 'en+forced'], ['ja', 'en+forced'],
+                           settings, None)
+        # the non-common option is disabled in both lists
+        for lst in (dlg.lst_primary, dlg.lst_secondary):
+            texts = {lst.item(i).text(): lst.item(i)
+                     for i in range(lst.count())}
+            self.assertFalse(texts['en'].flags() &
+                             Qt.ItemFlag.ItemIsEnabled)
+            self.assertTrue(texts['ja'].flags() &
+                            Qt.ItemFlag.ItemIsEnabled)
+        # OK disabled until two DIFFERENT variants picked
+        ok = dlg.btns.button(dlg.btns.StandardButton.Ok)
+        self.assertFalse(ok.isEnabled())
+        dlg.lst_primary.item(0).setSelected(True)      # ja
+        dlg.lst_secondary.item(0).setSelected(True)    # ja again
+        self.assertFalse(ok.isEnabled())
+        dlg.lst_secondary.item(0).setSelected(False)
+        dlg.lst_secondary.item(2).setSelected(True)    # en (forced)
+        self.assertTrue(ok.isEnabled())
+        dlg.chk_close.setChecked(False)
+        dlg.accept()
+        self.assertEqual(dlg.choice(), ('ja', 'en+forced', False))
+        self.assertFalse(settings['merge_close_unused'])
 
 
 if __name__ == '__main__':

@@ -144,6 +144,27 @@ that uses it, live (the v1 "baked at parse" flaw is gone).
   probed video fps — telecine pairs (29.97i from 23.976) correctly map to
   "no change". Manual conform lives in Cue pane → Time tools.
 
+### Merge mode
+* **Merge selected…** in the Files pane combines two languages per
+  episode into ONE subtitle (e.g. Japanese dialogue + English forced
+  signs). Highlight any file of each episode; every open file of those
+  episodes is grouped by filename stem, and you pick the **primary**
+  and **secondary** language once for the whole batch (forced tracks
+  are distinct options; choices missing from any episode are greyed
+  out; fewer than two common options aborts with a warning).
+* The merged row shows `Episode01.jp.vtt | Episode01.en.forced.vtt`,
+  speaks the primary language (initials, mux tag, Default profile) and
+  writes `Episode01.ja+en.forced.sup` by default. "Close unused"
+  (remembered) closes the leftovers.
+* Lines keep their SOURCE language, so per-language Text style
+  overrides still apply per line; secondary styles/regions get a
+  `.lang` suffix; secondary initials survive as a style on its cues.
+* The cue pane grows a **language filter** and **Snap timestamps…**
+  for merged files: secondary cue edges snap to the nearest primary
+  cue boundary within a threshold (default 0.5 s) — edges with no
+  boundary in range stay put, inverted/zero-length results are
+  prevented.
+
 ### The queue (rebuilt)
 * **Added ≠ started.** The Sources pane *adds* files to the queue; the
   queue panel's **Render all / Render selected** (or per-item context

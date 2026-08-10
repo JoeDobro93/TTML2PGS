@@ -40,10 +40,14 @@ class DocumentSession:
     use_manual_conform: bool = False
     out_path: str = ''
     dirty: bool = False
+    #: merge mode: source file names ("A.ja.vtt | B.en.forced.vtt")
+    merged_from: List[str] = field(default_factory=list)
 
     # ------------------------------------------------------------------ #
     @property
     def display_name(self) -> str:
+        if self.merged_from:
+            return ' | '.join(self.merged_from)
         return os.path.basename(self.sub_path)
 
     @property
@@ -136,6 +140,28 @@ class AppState:
         # NOTE: no per-language override set is auto-created — languages
         # without their own tab follow Default, and tabs are added only
         # manually (the auto-created clones used to hijack Default edits).
+        return sess
+
+    def find_session_by_name(self, path: str) -> int:
+        """Index of an open session with the same FILE NAME (any
+        directory) — used to stop the same subtitle loading twice."""
+        name = os.path.normcase(os.path.basename(path))
+        for i, s in enumerate(self.sessions):
+            if s.merged_from:
+                continue
+            if os.path.normcase(os.path.basename(s.sub_path)) == name:
+                return i
+        return -1
+
+    def reload_session(self, index: int, path: str) -> DocumentSession:
+        """Replace an open session with a freshly loaded copy of
+        `path` (same slot, video re-matched)."""
+        doc = load_subtitle(os.path.abspath(path))
+        sess = DocumentSession(doc=doc, sub_path=os.path.abspath(path))
+        sess.auto_match_video()
+        sess.out_path = sess.default_out_path()
+        self.sessions[index] = sess
+        self.active_index = index
         return sess
 
     def close_session(self, index: int):

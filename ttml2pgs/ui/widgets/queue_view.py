@@ -151,6 +151,14 @@ class QueuePane(QWidget):
         self.b_start_sel = QPushButton('▶ Render selected')
         self.b_start_sel.setToolTip(
             'Start only the selected jobs / video groups.')
+        self.b_check_sel = QPushButton('☑ Check sel.')
+        self.b_check_sel.setToolTip(
+            'Tick the checkbox of every highlighted row (videos and '
+            'subtitles alike).')
+        self.b_uncheck_sel = QPushButton('☐ Uncheck sel.')
+        self.b_uncheck_sel.setToolTip(
+            'Untick the checkbox of every highlighted row — they sit '
+            'out of "Render all".')
         self.b_pause = QPushButton('⏸ Pause')
         self.b_pause.setToolTip(
             'Pause rendering: the running job checkpoints between cues; '
@@ -163,6 +171,8 @@ class QueuePane(QWidget):
         row1 = QHBoxLayout()
         row1.addWidget(self.b_start_all)
         row1.addWidget(self.b_start_sel)
+        row1.addWidget(self.b_check_sel)
+        row1.addWidget(self.b_uncheck_sel)
         row1.addStretch()
         lay.addLayout(row1)
         row2 = QHBoxLayout()
@@ -192,6 +202,9 @@ class QueuePane(QWidget):
 
         self.b_start_all.clicked.connect(self._start_all)
         self.b_start_sel.clicked.connect(self._start_selected)
+        self.b_check_sel.clicked.connect(lambda: self._check_selected(True))
+        self.b_uncheck_sel.clicked.connect(
+            lambda: self._check_selected(False))
         self.b_pause.clicked.connect(self.queue.pause_all)
         self.b_resume.clicked.connect(self.queue.resume_all)
         self.b_clear.clicked.connect(self._clear_finished)
@@ -296,6 +309,15 @@ class QueuePane(QWidget):
                 self.queue.start_job(ident)
             elif kind == 'group':
                 self.queue.start_group(ident)
+        self.refresh()
+
+    def _check_selected(self, on: bool):
+        """Tick/untick the arming checkbox of every highlighted row."""
+        for kind, ident in self._selection():
+            if kind == 'group':
+                self.queue.set_group_checked(ident, on)
+            elif kind == 'job':
+                self.queue.set_job_checked(ident, on)
         self.refresh()
 
     def _pause_selected(self):
@@ -530,6 +552,10 @@ class QueuePane(QWidget):
         label = f'{n} items' if n_groups else f'{n} jobs'
         menu.addAction(f'▶ Start selected ({label})',
                        self._start_selected)
+        menu.addAction(f'☑ Check selected ({label})',
+                       lambda: self._check_selected(True))
+        menu.addAction(f'☐ Uncheck selected ({label})',
+                       lambda: self._check_selected(False))
         menu.addAction('Pause selected', self._pause_selected)
         menu.addAction('Resume/Retry selected', self._retry_resume_selected)
         menu.addAction('Cancel selected', self._cancel_selected)
