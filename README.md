@@ -157,7 +157,7 @@ preview immediately.
 
 ## Render queue (left dock)
 
-Adding files stages them; **▶ Render all / ▶ Render selected** actually
+Adding files stages them; **▶ Start all / ▶ Start selected** actually
 starts work. **Queue .sup files…** loads already-rendered `.sup` files
 (many at once) as finished render jobs — matched to a video by file
 name, shown done at 100%, waiting like any added work until you start

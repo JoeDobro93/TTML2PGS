@@ -1499,6 +1499,7 @@ class TestPipelineAndQueue(unittest.TestCase):
                 j.progress = 1.0
             g1, g2 = q.snapshot()
             g1.mux_enabled = False               # mux-later batch
+            g1.muxed_paths = [sup2]              # (whatever was muxed in)
             g2.mux_state = JobState.DONE         # fully muxed
             q._save_state()
 
@@ -1507,6 +1508,7 @@ class TestPipelineAndQueue(unittest.TestCase):
             (g,) = q2.snapshot()
             self.assertEqual(g.video_path, v1)
             self.assertFalse(g.mux_enabled)      # still off until toggled
+            self.assertEqual(g.muxed_paths, [sup2])
             self.assertEqual(g.render_jobs[0].state, JobState.DONE)
             self.assertEqual(g.render_jobs[0].progress, 1.0)
 
@@ -1575,10 +1577,19 @@ class TestPipelineAndQueue(unittest.TestCase):
             # done but UNSTARTED: holds the mux like any added work…
             self.assertEqual(g.unstarted_count(), 2)
             self.assertFalse(g.wants_mux())
+            # …and the UI says so honestly: amber 'added · done' rows,
+            # the group counts them as added and explains the wait
+            from ttml2pgs.ui.widgets.queue_view import (_group_summary,
+                                                        _job_state_label)
+            self.assertEqual(_job_state_label(jm), 'added · done')
+            state_txt, _, _, info = _group_summary(g)
+            self.assertIn('added', state_txt)
+            self.assertIn('not started', info)
             # …and starting the group releases it
             q.start_group(g.id)
             self.assertEqual(g.unstarted_count(), 0)
             self.assertTrue(g.wants_mux())
+            self.assertEqual(_job_state_label(jm), 'done')
             # re-adding the same .sup replaces, never duplicates
             pane.queue_sup_files([s_merged])
             (g,) = q.snapshot()
@@ -1696,6 +1707,69 @@ class TestPipelineAndQueue(unittest.TestCase):
             self.assertFalse(g1.replace_original or g2.replace_original)
             pane._set_replace_selected(True)
             self.assertTrue(g1.replace_original and g2.replace_original)
+
+    def test_mux_never_duplicates_tracks(self):
+        """Round 30 audit: a replace-original mux records what now
+        lives INSIDE the video — adding one more subtitle later muxes
+        only the new one; re-arming with nothing new is a clean no-op;
+        an explicit re-queue of a path muxes its new version again."""
+        from ttml2pgs.core import jobqueue
+        from ttml2pgs.core.jobqueue import JobState, QueueManager
+        calls = []
+
+        def fake_remux(video, subs, replace_original=True,
+                       progress=None, cancel=None):
+            calls.append([os.path.basename(s.path) for s in subs])
+            return True, video               # replaced in place
+
+        orig = jobqueue.remux
+        jobqueue.remux = fake_remux
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                v = os.path.join(td, 'ep1.mkv')
+                s1 = os.path.join(td, 'ep1.ja.sup')
+                s2 = os.path.join(td, 'ep1.en.sup')
+                s3 = os.path.join(td, 'ep1.en.forced.sup')
+                for p in (v, s1, s2, s3):
+                    open(p, 'wb').write(b'x')
+                q = QueueManager()           # never started: no threads
+                q.add_finished_sup(v, s1, lang='ja')
+                q.add_finished_sup(v, s2, lang='en')
+                (g,) = q.snapshot()
+                self.assertFalse(g.wants_mux())      # added ≠ started
+                q.start_group(g.id)
+                self.assertTrue(g.wants_mux())
+                q._run_mux(g)                        # mux 1: both subs
+                self.assertEqual(calls[-1],
+                                 ['ep1.ja.sup', 'ep1.en.sup'])
+                self.assertEqual(g.mux_state, JobState.DONE)
+                self.assertEqual(len(g.muxed_paths), 2)
+
+                # one more for the same video → only IT muxes (no dupes)
+                q.add_finished_sup(v, s3, lang='en')
+                self.assertEqual(g.mux_state, JobState.WAITING)
+                self.assertFalse(g.wants_mux())      # new one unstarted
+                q.start_group(g.id)
+                q._run_mux(g)
+                self.assertEqual(calls[-1], ['ep1.en.forced.sup'])
+
+                # mux off/on with nothing new: clean no-op, not a fail
+                n_calls = len(calls)
+                q.set_group_mux(g.id, False)
+                q.set_group_mux(g.id, True)          # re-arms
+                self.assertTrue(g.wants_mux())
+                q._run_mux(g)
+                self.assertEqual(len(calls), n_calls)
+                self.assertEqual(g.mux_state, JobState.DONE)
+                self.assertIn('nothing new', g.mux_message)
+
+                # explicit re-queue: the NEW version muxes again
+                q.add_finished_sup(v, s1, lang='ja')
+                q.start_group(g.id)
+                q._run_mux(g)
+                self.assertEqual(calls[-1], ['ep1.ja.sup'])
+        finally:
+            jobqueue.remux = orig
 
     def test_mux_preflight_disk_space(self):
         """A nearly-full destination drive fails BEFORE writing with an

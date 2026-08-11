@@ -45,6 +45,10 @@ _ADDED_COLOR = '#c8b06a'      # added-but-not-started
 def _job_state_label(j: RenderJob) -> str:
     if j.state == JobState.PENDING:
         return 'queued' if j.started else 'added'
+    if j.state == JobState.DONE and not j.started:
+        # a loaded .sup: rendered, but like all added work it waits
+        # for a start before its video muxes
+        return 'added · done'
     return j.state.value
 
 
@@ -56,8 +60,9 @@ def _group_summary(g: VideoGroup) -> Tuple[str, str, str, str]:
     n_done = sum(1 for j in jobs if j.state == JobState.DONE)
     n_fail = sum(1 for j in jobs if j.state == JobState.FAILED)
     n_pause = sum(1 for j in jobs if j.state == JobState.PAUSED)
-    n_added = sum(1 for j in jobs
-                  if not j.started and not j.state.is_terminal())
+    # unstarted work of ANY state (including loaded already-done .sups)
+    # counts as 'added' — it holds the group's mux until started
+    n_added = g.unstarted_count()
     n_queued = sum(1 for j in jobs
                    if j.started and j.state == JobState.PENDING)
     running = any(j.state == JobState.RUNNING for j in jobs)
@@ -118,6 +123,8 @@ def _group_summary(g: VideoGroup) -> Tuple[str, str, str, str]:
                 }.get(g.mux_state, '')
         if g.mux_state == JobState.WAITING and n_wait:
             info = f'mux: waiting — {n_wait} job(s) not started yet'
+        elif g.mux_state == JobState.WAITING and renders_settled and jobs:
+            info = 'mux: next up'
         if not g.mux_enabled:
             info = 'mux: disabled'
         elif not g.replace_original:
@@ -145,55 +152,61 @@ class QueuePane(QWidget):
 
         self._updating = False           # guard: programmatic item edits
 
-        # two compact button rows so the pane fits a left/right dock
-        self.b_start_all = QPushButton('▶ Render all')
+        # two tidy rows: RUN CONTROL on top, queue management below
+        self.b_start_all = QPushButton('▶ Start all')
         self.b_start_all.setToolTip(
-            'Start every CHECKED job whose video is checked too '
-            '(MakeMKV-style: the checkboxes decide what a batch start '
-            'touches). Unchecked rows sit out.')
-        self.b_start_sel = QPushButton('▶ Render selected')
+            'Start every CHECKED item whose video is checked too '
+            '(MakeMKV-style): renders anything not yet rendered, and '
+            'arms the videos\' muxes — loaded .sups just arm. '
+            'Unchecked rows sit out.')
+        self.b_start_sel = QPushButton('▶ Start selected')
         self.b_start_sel.setToolTip(
-            'Start only the selected jobs / video groups.')
-        self.b_check_sel = QPushButton('☑ Check sel.')
+            'Start only the highlighted subtitles / video groups '
+            '(render if needed, then mux).')
+        self.b_pause = QPushButton('⏸ Pause')
+        self.b_pause.setToolTip(
+            'Pause: the running render checkpoints between cues; '
+            'started jobs stay queued. Added-only work is untouched.')
+        self.b_resume = QPushButton('⏵ Resume')
+        self.b_resume.setToolTip(
+            'Continue paused/started work. Added-only work keeps '
+            'waiting for a Start.')
+        self.b_add_sups = QPushButton('Queue .sup files…')
+        self.b_add_sups.setToolTip(
+            'Load already-rendered .sup files (several at once). Each '
+            'is matched to a video by file name and appears as a '
+            'finished render — start it like anything else to mux. '
+            'Language, forced flag and track label come from the '
+            'extension chain (.ja, .en.forced, .ja+en.forced…).')
+        self.b_check_sel = QPushButton('☑ Sel.')
         self.b_check_sel.setToolTip(
             'Tick the checkbox of every highlighted row (videos and '
             'subtitles alike).')
-        self.b_uncheck_sel = QPushButton('☐ Uncheck sel.')
+        self.b_uncheck_sel = QPushButton('☐ Sel.')
         self.b_uncheck_sel.setToolTip(
             'Untick the checkbox of every highlighted row — they sit '
-            'out of "Render all".')
-        self.b_pause = QPushButton('⏸ Pause')
-        self.b_pause.setToolTip(
-            'Pause rendering: the running job checkpoints between cues; '
-            'started jobs stay queued. Jobs merely added are untouched.')
-        self.b_resume = QPushButton('⏵ Resume')
-        self.b_resume.setToolTip(
-            'Continue paused/started work. Jobs never started stay '
-            'waiting for you to start them.')
-        self.b_clear = QPushButton('Clear finished')
-        self.b_clear_all = QPushButton('Clear all…')
-        self.b_clear_all.setToolTip(
-            'Remove EVERYTHING from the queue (running jobs are '
-            'canceled). Asks first.')
-        self.b_add_sups = QPushButton('Queue .sup files…')
-        self.b_add_sups.setToolTip(
-            'Pick already-rendered .sup files (several at once) to mux. '
-            'Each is matched to a video by file name and grouped with '
-            'it; language, forced flag and track label come from the '
-            'extension chain (.ja, .en.forced, .ja+en.forced…).')
+            'out of "Start all".')
+        from PyQt6.QtWidgets import QToolButton
+        self.b_clear = QToolButton()
+        self.b_clear.setText('Clear ')
+        self.b_clear.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        m_clear = QMenu(self.b_clear)
+        m_clear.addAction('Clear finished', self._clear_finished)
+        m_clear.addAction('Clear all…', self._clear_all)
+        self.b_clear.setMenu(m_clear)
         row1 = QHBoxLayout()
         row1.addWidget(self.b_start_all)
         row1.addWidget(self.b_start_sel)
-        row1.addWidget(self.b_check_sel)
-        row1.addWidget(self.b_uncheck_sel)
+        row1.addWidget(self.b_pause)
+        row1.addWidget(self.b_resume)
         row1.addStretch()
         lay.addLayout(row1)
         row2 = QHBoxLayout()
-        row2.addWidget(self.b_pause)
-        row2.addWidget(self.b_resume)
         row2.addWidget(self.b_add_sups)
+        row2.addWidget(self.b_check_sel)
+        row2.addWidget(self.b_uncheck_sel)
         row2.addWidget(self.b_clear)
-        row2.addWidget(self.b_clear_all)
         row2.addStretch()
         self.lbl_status = QLabel('')
         row2.addWidget(self.lbl_status)
@@ -228,8 +241,6 @@ class QueuePane(QWidget):
             lambda: self._check_selected(False))
         self.b_pause.clicked.connect(self.queue.pause_all)
         self.b_resume.clicked.connect(self.queue.resume_all)
-        self.b_clear.clicked.connect(self._clear_finished)
-        self.b_clear_all.clicked.connect(self._clear_all)
         self.tree.customContextMenuRequested.connect(self._menu)
         self.tree.itemChanged.connect(self._item_check_changed)
         self.tree.itemSelectionChanged.connect(self._constrain_selection)
@@ -518,7 +529,9 @@ class QueuePane(QWidget):
                 total += 1
                 if j.state == JobState.DONE:
                     done += 1
-                if not j.started and not j.state.is_terminal():
+                # unstarted work of any state (loaded .sups included)
+                if not j.started and j.state not in (JobState.FAILED,
+                                                     JobState.CANCELED):
                     added += 1
                 if j.started and not j.state.is_terminal():
                     active += 1
@@ -586,7 +599,7 @@ class QueuePane(QWidget):
                          (3, info)):
             if it.text(col) != txt:
                 it.setText(col, txt)
-        color = _ADDED_COLOR if label == 'added' \
+        color = _ADDED_COLOR if label.startswith('added') \
             else _STATE_COLORS.get(j.state, '#ccc')
         it.setForeground(1, QBrush(QColor(color)))
         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -722,7 +735,7 @@ class QueuePane(QWidget):
 
     def _job_menu(self, menu: QMenu, ident: int):
         job = self.queue.find_job(ident)
-        a_start = menu.addAction('Start (render) this job')
+        a_start = menu.addAction('Start this job')
         if job is not None and (job.started or job.state.is_terminal()):
             a_start.setEnabled(job.state == JobState.PAUSED)
         a_pause = menu.addAction('Pause job')
@@ -775,7 +788,7 @@ class QueuePane(QWidget):
 
     def _group_menu(self, menu: QMenu, ident: int):
         g = next((x for x in self.queue.snapshot() if x.id == ident), None)
-        a_start = menu.addAction('Start (render) checked subtitles')
+        a_start = menu.addAction('Start checked subtitles')
         menu.addSeparator()
         a_sel_all = menu.addAction('Select all subtitles')
         a_sel_none = menu.addAction('Unselect all subtitles')

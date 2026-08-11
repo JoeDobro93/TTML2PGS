@@ -102,6 +102,10 @@ class VideoGroup:
     mux_message: str = ''
     mux_error: str = ''
     replace_original: bool = True
+    #: subs already muxed INTO the current video file (a replace-original
+    #: mux swapped it in place) — re-muxes skip these so adding one more
+    #: subtitle later never duplicates the earlier tracks
+    muxed_paths: List[str] = field(default_factory=list)
     id: int = field(default_factory=lambda: next(_ids))
 
     def label(self) -> str:
@@ -237,6 +241,11 @@ class QueueManager:
                             old.pipeline.cancel_event.set()
                             old.pipeline.pause_event.set()
                         g.render_jobs.remove(old)
+                    # an explicit re-queue wants the NEW version muxed —
+                    # forget that this path was already muxed in
+                    g.muxed_paths = [
+                        p for p in g.muxed_paths
+                        if os.path.normcase(os.path.abspath(p)) != norm]
                 self._prune_empty_groups()
             group = self._group_for_video(video_path)
             group.render_jobs.append(job)
@@ -284,6 +293,9 @@ class QueueManager:
                 g.external_sups = [
                     e for e in g.external_sups
                     if os.path.normcase(os.path.abspath(e.sup_path)) != norm]
+                g.muxed_paths = [
+                    p for p in g.muxed_paths
+                    if os.path.normcase(os.path.abspath(p)) != norm]
             self._prune_empty_groups()
             group = self._group_for_video(video_path)
             group.external_sups.append(ent)
@@ -687,22 +699,42 @@ class QueueManager:
     def _run_mux(self, group: VideoGroup):
         self._notify()
         from .video import parse_sup_name
+
+        def norm(p):
+            return os.path.normcase(os.path.abspath(p))
+
+        inside = {norm(p) for p in group.muxed_paths}
         subs: List[SubTrack] = []
+        skipped = 0
         for j in group.render_jobs:
             if j.state == JobState.DONE and os.path.exists(j.settings.out_path):
+                if norm(j.settings.out_path) in inside:
+                    skipped += 1
+                    continue
                 subs.append(SubTrack(path=j.settings.out_path, lang=j.lang,
                                      track_name=j.track_name,
                                      forced=parse_sup_name(
                                          j.settings.out_path)[2]))
         for e in group.external_sups:
             if os.path.exists(e.sup_path):
+                if norm(e.sup_path) in inside:
+                    skipped += 1
+                    continue
                 subs.append(SubTrack(path=e.sup_path, lang=e.lang,
                                      track_name=e.track_name,
                                      forced=parse_sup_name(e.sup_path)[2]))
         if not subs:
             with self._lock:
-                group.mux_state = JobState.FAILED
-                group.mux_error = 'no subtitle tracks produced'
+                if skipped:
+                    # everything is already inside the video — a re-armed
+                    # mux with nothing new is a clean no-op, not an error
+                    group.mux_state = JobState.DONE
+                    group.mux_message = ('nothing new to mux — '
+                                         f'{skipped} track(s) already in '
+                                         'the video')
+                else:
+                    group.mux_state = JobState.FAILED
+                    group.mux_error = 'no subtitle tracks produced'
             self._notify()
             return
 
@@ -737,6 +769,15 @@ class QueueManager:
             if ok:
                 group.mux_state = JobState.DONE
                 group.mux_message = f"muxed → {os.path.basename(res)}"
+                if skipped:
+                    group.mux_message += f' (+{skipped} already in it)'
+                if group.video_path and \
+                        norm(res) == norm(group.video_path):
+                    # the original was replaced IN PLACE: these subs now
+                    # live inside the video — never mux them again
+                    for s in subs:
+                        if norm(s.path) not in inside:
+                            group.muxed_paths.append(s.path)
             else:
                 group.mux_state = JobState.FAILED
                 group.mux_error = res
@@ -780,6 +821,7 @@ class QueueManager:
                         'mux_state': g.mux_state.value,
                         'mux_error': g.mux_error,
                         'replace_original': g.replace_original,
+                        'muxed_paths': g.muxed_paths,
                         'checked': g.checked,
                         'renders': [{
                             'sub_path': j.sub_path,
@@ -842,6 +884,8 @@ class QueueManager:
                 g = VideoGroup(video_path=gd.get('video_path'))
                 g.mux_enabled = bool(gd.get('mux_enabled', True))
                 g.replace_original = bool(gd.get('replace_original', True))
+                g.muxed_paths = [str(p) for p in
+                                 gd.get('muxed_paths', [])]
                 g.checked = bool(gd.get('checked', True))
                 for jd in renders:
                     settings = RenderSettings.from_dict(jd.get('settings', {}))
