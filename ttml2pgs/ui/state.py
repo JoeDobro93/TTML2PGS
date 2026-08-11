@@ -115,6 +115,9 @@ class AppState:
             'preview_bg': '#B0C4DE',       # v1's LightSteelBlue matte
             'restore_session': True,
             'render_workers': 0,           # 0 = auto (cores-1, cap 8)
+            #: '' = next to the video; 'system' = OS temp; else a folder.
+            #: A fast internal drive here speeds up USB-HDD remuxes a lot.
+            'mux_temp_dir': '',
         }
         self._settings_path = os.path.join(config_dir(), 'settings.json')
         self._session_path = os.path.join(config_dir(), 'session.json')

@@ -1332,7 +1332,7 @@ class TestPipelineAndQueue(unittest.TestCase):
         calls = []
 
         def fake_remux(video, subs, replace_original=True,
-                       progress=None, cancel=None):
+                       progress=None, cancel=None, temp_dir=None):
             calls.append((video, [s.path for s in subs]))
             return True, video
 
@@ -1384,7 +1384,7 @@ class TestPipelineAndQueue(unittest.TestCase):
         calls = []
 
         def fake_remux(video, subs, replace_original=True,
-                       progress=None, cancel=None):
+                       progress=None, cancel=None, temp_dir=None):
             calls.append([s.path for s in subs])
             return True, video
 
@@ -1609,7 +1609,7 @@ class TestPipelineAndQueue(unittest.TestCase):
         captured = {}
 
         def fake_remux(video, subs, replace_original=True,
-                       progress=None, cancel=None):
+                       progress=None, cancel=None, temp_dir=None):
             captured['subs'] = list(subs)
             return True, video
 
@@ -1718,7 +1718,7 @@ class TestPipelineAndQueue(unittest.TestCase):
         calls = []
 
         def fake_remux(video, subs, replace_original=True,
-                       progress=None, cancel=None):
+                       progress=None, cancel=None, temp_dir=None):
             calls.append([os.path.basename(s.path) for s in subs])
             return True, video               # replaced in place
 
@@ -1771,6 +1771,72 @@ class TestPipelineAndQueue(unittest.TestCase):
         finally:
             jobqueue.remux = orig
 
+    def test_mux_temp_dir_and_copy_back(self):
+        """Round 31: with a mux temp folder on another drive, the
+        working file is written THERE and then copied back sequentially
+        — final result identical, temp cleaned up. When the destination
+        can't hold a side-by-side copy and we're replacing anyway, the
+        original is deleted first (temp file is the safety copy)."""
+        import collections
+        from ttml2pgs.core import video as vid
+
+        def fake_mkvmerge(exe, video, subs, out_tmp, progress, cancel):
+            open(out_tmp, 'wb').write(b'MUXED!')
+            return True, ''
+
+        orig_find = vid.find_mkvmerge
+        orig_merge = vid._remux_mkvmerge
+        vid.find_mkvmerge = lambda: '/usr/bin/mkvmerge'
+        vid._remux_mkvmerge = fake_mkvmerge
+        try:
+            with tempfile.TemporaryDirectory() as dest, \
+                    tempfile.TemporaryDirectory() as fast:
+                v = os.path.join(dest, 'ep1.mkv')
+                s1 = os.path.join(dest, 'ep1.ja.sup')
+                open(v, 'wb').write(b'ORIGINAL')
+                open(s1, 'wb').write(b'S')
+
+                ok, res = vid.remux(v, [vid.SubTrack(path=s1, lang='ja')],
+                                    replace_original=True, temp_dir=fast)
+                self.assertTrue(ok, res)
+                self.assertEqual(res, v)
+                self.assertEqual(open(v, 'rb').read(), b'MUXED!')
+                self.assertEqual(os.listdir(fast), [],
+                                 'temp folder must be cleaned up')
+                self.assertEqual(
+                    [f for f in os.listdir(dest) if 't2p_mux' in f], [])
+
+                # resolve: bad folder falls back to the video's own
+                self.assertEqual(
+                    vid.resolve_mux_temp(os.path.join(v, 'x'), dest),
+                    dest)
+                self.assertEqual(vid.resolve_mux_temp('', dest), dest)
+
+                # destination too full for a side-by-side copy →
+                # delete-first path still succeeds
+                open(v, 'wb').write(b'ORIGINAL2')
+                DU = collections.namedtuple('usage', 'total used free')
+                orig_du = vid.shutil.disk_usage
+                big, tiny = DU(10**12, 0, 10**11), DU(10**12, 10**12, 10)
+
+                def fake_du(p):
+                    p = os.path.normcase(os.path.abspath(p))
+                    return tiny if p == os.path.normcase(dest) else big
+
+                vid.shutil.disk_usage = fake_du
+                try:
+                    ok, res = vid.remux(
+                        v, [vid.SubTrack(path=s1, lang='ja')],
+                        replace_original=True, temp_dir=fast)
+                finally:
+                    vid.shutil.disk_usage = orig_du
+                self.assertTrue(ok, res)
+                self.assertEqual(open(v, 'rb').read(), b'MUXED!')
+                self.assertEqual(os.listdir(fast), [])
+        finally:
+            vid.find_mkvmerge = orig_find
+            vid._remux_mkvmerge = orig_merge
+
     def test_mux_preflight_disk_space(self):
         """A nearly-full destination drive fails BEFORE writing with an
         actionable message, not mkvmerge's mid-write 'error 112'."""
@@ -1804,7 +1870,7 @@ class TestPipelineAndQueue(unittest.TestCase):
         fail_ep1 = {'on': True}
 
         def fake_remux(video, subs, replace_original=True,
-                       progress=None, cancel=None):
+                       progress=None, cancel=None, temp_dir=None):
             calls.append(video)
             if 'ep1' in os.path.basename(video) and fail_ep1['on']:
                 return False, 'finalize failed: locked'

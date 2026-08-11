@@ -6,6 +6,7 @@ preferred, ffmpeg fallback).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -334,13 +335,39 @@ def mux_language(lang: str) -> str:
     return _ISO639_2.get(l, _ISO639_2.get(l.split('-')[0], 'und'))
 
 
+def resolve_mux_temp(temp_dir: Optional[str], video_dir: str) -> str:
+    """Where the mux writes its working file: '' → next to the video;
+    'system' → the OS temp folder; else the given folder. Unusable
+    folders fall back to the video's own."""
+    if not temp_dir:
+        return video_dir
+    d = tempfile.gettempdir() if temp_dir == 'system' else temp_dir
+    try:
+        os.makedirs(d, exist_ok=True)
+        probe = os.path.join(d, f'.t2p_probe_{os.getpid()}')
+        open(probe, 'wb').close()
+        os.remove(probe)
+        return d
+    except OSError:
+        return video_dir
+
+
 def remux(video_path: str, subs: List[SubTrack],
           replace_original: bool = True,
           progress: Optional[Callable[[int, int, str], None]] = None,
-          cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
+          cancel: Optional[Callable[[], bool]] = None,
+          temp_dir: Optional[str] = None) -> Tuple[bool, str]:
     """
     Mux .sup tracks into the video. Returns (ok, final_path_or_error).
     mkvmerge preferred; ffmpeg fallback. Output is always Matroska.
+
+    `temp_dir` ('' = next to the video, 'system', or a folder): where
+    the working file goes. Pointing it at a fast internal drive turns
+    a USB-HDD remux from one seek-thrashing interleaved pass (the head
+    bouncing between read and write positions on the same spindle)
+    into two clean sequential ones — mkvmerge reads the HDD at full
+    speed while writing to the fast drive, then the result copies
+    back in one sequential write.
     """
     if not os.path.exists(video_path):
         return False, f"video not found: {video_path}"
@@ -348,26 +375,45 @@ def remux(video_path: str, subs: List[SubTrack],
         if not os.path.exists(s.path):
             return False, f"subtitle not found: {s.path}"
 
-    directory = os.path.dirname(video_path)
+    directory = os.path.dirname(os.path.abspath(video_path))
     name, ext = os.path.splitext(os.path.basename(video_path))
-    out_tmp = os.path.join(directory, f"{name}.t2p_mux.mkv")
+    work_dir = resolve_mux_temp(temp_dir, directory)
+    remote = (os.path.normcase(os.path.abspath(work_dir)) !=
+              os.path.normcase(directory))
+    if remote:
+        # collision-proof across same-named videos in other folders
+        tag = hashlib.sha1(os.path.normcase(directory)
+                           .encode('utf-8')).hexdigest()[:8]
+        out_tmp = os.path.join(work_dir, f"{name}.{tag}.t2p_mux.mkv")
+    else:
+        out_tmp = os.path.join(directory, f"{name}.t2p_mux.mkv")
 
-    # muxing writes a FULL temporary copy of the video next to it —
-    # check the headroom up front so a nearly-full drive gives a clear
-    # message instead of mkvmerge dying mid-write with 'error 112'
+    # muxing writes a FULL temporary copy of the video — check the
+    # headroom up front so a nearly-full drive gives a clear message
+    # instead of mkvmerge dying mid-write with 'error 112'
     try:
         need = os.path.getsize(video_path) + sum(
             os.path.getsize(s.path) for s in subs)
-        free = shutil.disk_usage(directory).free
         margin = 256 << 20                       # 256 MB safety
+        free = shutil.disk_usage(work_dir).free
         if free < need + margin:
-            drive = os.path.splitdrive(directory)[0] or directory
+            where = (f"the mux temp folder ({work_dir})" if remote else
+                     (os.path.splitdrive(directory)[0] or directory))
             return False, (
-                f"not enough free space on {drive}: muxing writes a "
+                f"not enough free space on {where}: muxing writes a "
                 f"full temporary copy of the video first — needs "
                 f"~{(need + margin) / 1e9:.1f} GB free, only "
                 f"{free / 1e9:.1f} GB available. Free up space and "
                 f"use Retry mux.")
+        if remote and not replace_original:
+            free_dest = shutil.disk_usage(directory).free
+            if free_dest < need + margin:
+                drive = os.path.splitdrive(directory)[0] or directory
+                return False, (
+                    f"not enough free space on {drive} for the copied "
+                    f"result — needs ~{(need + margin) / 1e9:.1f} GB, "
+                    f"only {free_dest / 1e9:.1f} GB available. Free up "
+                    f"space and use Retry mux.")
     except OSError:
         pass                                     # preflight is best-effort
     final = os.path.join(directory, f"{name}.mkv") if replace_original \
@@ -387,6 +433,10 @@ def remux(video_path: str, subs: List[SubTrack],
                 pass
         return False, err
 
+    if remote:
+        return _deliver_remote(out_tmp, video_path, final,
+                               replace_original, progress=progress,
+                               cancel=cancel)
     return _finalize_mux(out_tmp, video_path, final, replace_original,
                          progress=progress)
 
@@ -438,6 +488,112 @@ def _finalize_mux(out_tmp: str, video_path: str, final: str,
         except OSError as e:
             last = e
     return False, f"finalize failed: {last}"
+
+
+def _copy_file(src: str, dst: str, progress, label: str,
+               cancel=None, chunk: int = 16 << 20):
+    """Sequential chunked copy with progress + cancel."""
+    total = os.path.getsize(src)
+    done = 0
+    with open(src, 'rb') as fi, open(dst, 'wb') as fo:
+        while True:
+            if cancel and cancel():
+                raise OSError('copy canceled')
+            buf = fi.read(chunk)
+            if not buf:
+                break
+            fo.write(buf)
+            done += len(buf)
+            if progress and total:
+                progress(int(done * 100 / total), 100, label)
+
+
+def _deliver_remote(out_tmp: str, video_path: str, final: str,
+                    replace_original: bool,
+                    progress: Optional[Callable[[int, int, str], None]] = None,
+                    cancel: Optional[Callable[[], bool]] = None,
+                    delays: Sequence[float] = _FINALIZE_DELAYS
+                    ) -> Tuple[bool, str]:
+    """
+    The mux was written to a fast temp drive — bring it home in one
+    purely sequential copy. Normally it copies side-by-side and swaps
+    (crash-safe); when the destination drive can't hold a second copy
+    AND we're replacing the original anyway, the original is deleted
+    first — the complete temp file is the safety copy and is KEPT on
+    any failure.
+    """
+    directory = os.path.dirname(final)
+    size = os.path.getsize(out_tmp)
+    label = 'Copying the mux back to the video folder…'
+    try:
+        free = shutil.disk_usage(directory).free
+    except OSError:
+        free = None
+
+    if replace_original and free is not None and free < size + (64 << 20):
+        # not enough room for a side-by-side copy: delete-first path
+        last: Optional[OSError] = None
+        for d in delays:
+            if d:
+                time.sleep(d)
+                if progress:
+                    progress(100, 100, 'Waiting for the video file to '
+                                       'be released…')
+            try:
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+                last = None
+                break
+            except OSError as e:
+                last = e
+        if last is not None:
+            return False, (f'destination is full and the original is '
+                           f'locked ({last}) — nothing was deleted; the '
+                           f'finished mux is kept at {out_tmp}. Free '
+                           f'space or close the program holding the '
+                           f'video, then Retry mux.')
+        try:
+            _copy_file(out_tmp, final, progress, label, cancel)
+        except OSError as e:
+            try:
+                if os.path.exists(final):
+                    os.remove(final)         # drop the partial copy
+            except OSError:
+                pass
+            return False, (f'copy back failed after deleting the '
+                           f'original: {e}. The COMPLETE mux is safe at '
+                           f'{out_tmp} — copy it into place manually or '
+                           f'free space and Retry mux.')
+        try:
+            os.remove(out_tmp)
+        except OSError:
+            pass
+        return True, final
+
+    # normal path: side-by-side copy, then the usual swap
+    dest_tmp = os.path.join(
+        directory,
+        os.path.splitext(os.path.basename(final))[0] + '.t2p_mux.mkv')
+    try:
+        _copy_file(out_tmp, dest_tmp, progress, label, cancel)
+    except OSError as e:
+        try:
+            if os.path.exists(dest_tmp):
+                os.remove(dest_tmp)
+        except OSError:
+            pass
+        return False, (f'copy back failed: {e} — the finished mux is '
+                       f'kept at {out_tmp}; free space or reconnect '
+                       f'the drive, then Retry mux.')
+    ok, res = _finalize_mux(dest_tmp, video_path, final,
+                            replace_original, progress=progress,
+                            delays=delays)
+    if ok:
+        try:
+            os.remove(out_tmp)
+        except OSError:
+            pass
+    return ok, res
 
 
 def _remux_mkvmerge(exe, video_path, subs, out_path, progress, cancel

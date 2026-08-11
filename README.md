@@ -188,7 +188,10 @@ restarts — finished work never re-runs.
 * **Preferences** (`Ctrl+,`): per-language **Default profiles** (styling
   used only where a file specifies nothing, so bare SRTs get your look
   while authored files stay untouched), player engine and external player
-  setup, and render worker count (rendering runs on multiple cores).
+  setup, render worker count (rendering runs on multiple cores), and a
+  **mux temp folder** — point it at a fast internal drive and remuxes of
+  videos on external HDDs run 2–4× faster (the working file is written
+  to the fast drive, then copied back in one sequential pass).
 
 # Known limitations
 

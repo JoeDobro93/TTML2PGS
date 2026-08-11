@@ -185,14 +185,64 @@ class PreferencesDialog(QDialog):
         for w in (self.chk_remux, self.chk_replace, self.chk_move):
             vl.addWidget(w)
             w.toggled.connect(self._output_changed)
+
+        vl.addSpacing(10)
+        vl.addWidget(_hint(
+            'Muxing rewrites the whole video. For videos on an external '
+            'HDD, writing the working file to a FAST internal drive '
+            'first (then copying back in one sequential pass) is '
+            'typically 2–4× faster than working on the HDD directly — '
+            'the disk never has to seek between reading and writing.'))
+        row = QHBoxLayout()
+        row.addWidget(QLabel('Mux temp folder:'))
+        self.cmb_muxtmp = QComboBox()
+        self.cmb_muxtmp.addItems([
+            'Next to the video (default)',
+            'System temp folder',
+            'Custom folder…'])
+        cur = s.get('mux_temp_dir', '')
+        self.ed_muxtmp = QLineEdit(
+            cur if cur and cur != 'system' else '')
+        self.ed_muxtmp.setPlaceholderText('folder on a fast drive')
+        self.b_muxtmp = QPushButton('Browse…')
+        self.cmb_muxtmp.setCurrentIndex(
+            0 if not cur else (1 if cur == 'system' else 2))
+        row.addWidget(self.cmb_muxtmp)
+        row.addWidget(self.ed_muxtmp, 1)
+        row.addWidget(self.b_muxtmp)
+        vl.addLayout(row)
+        self.cmb_muxtmp.currentIndexChanged.connect(self._output_changed)
+        self.ed_muxtmp.textChanged.connect(self._output_changed)
+        self.b_muxtmp.clicked.connect(self._pick_muxtmp)
+        self._sync_muxtmp_row()
+
         vl.addStretch()
         self.tabs.addTab(tab, 'Output')
+
+    def _sync_muxtmp_row(self):
+        custom = self.cmb_muxtmp.currentIndex() == 2
+        self.ed_muxtmp.setVisible(custom)
+        self.b_muxtmp.setVisible(custom)
+
+    def _pick_muxtmp(self):
+        from PyQt6.QtWidgets import QFileDialog
+        d = QFileDialog.getExistingDirectory(
+            self, 'Mux temp folder (on a fast drive)',
+            self.ed_muxtmp.text())
+        if d:
+            self.ed_muxtmp.setText(d)
+            self._output_changed()
 
     def _output_changed(self, *_):
         s = self.app_settings
         s['remux_after_render'] = self.chk_remux.isChecked()
         s['replace_original'] = self.chk_replace.isChecked()
         s['move_to_subs_folder'] = self.chk_move.isChecked()
+        idx = self.cmb_muxtmp.currentIndex()
+        s['mux_temp_dir'] = ('' if idx == 0 else
+                             'system' if idx == 1 else
+                             self.ed_muxtmp.text().strip())
+        self._sync_muxtmp_row()
         self.settings_changed.emit()
 
     # ------------------------------------------------------------------ #

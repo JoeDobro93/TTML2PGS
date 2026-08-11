@@ -75,6 +75,8 @@ class MainWindow(QMainWindow):
         self.queue_pane = QueuePane(self.queue, self.state.settings)
         self.queue.move_to_subs = self.state.settings.get(
             'move_to_subs_folder', False)
+        self.queue.mux_temp_dir = self.state.settings.get(
+            'mux_temp_dir', '')
         self.queue_pane.settings_changed.connect(self._queue_settings_edited)
 
         # cue table + the collapsible selected-cue editor share a column
@@ -220,11 +222,6 @@ class MainWindow(QMainWindow):
         self._pref_dialog.raise_()
         self._pref_dialog.activateWindow()
 
-    def _pref_settings_changed(self):
-        self.state.save_settings()
-        self.queue.move_to_subs = self.state.settings.get(
-            'move_to_subs_folder', False)
-
     # ------------------------------------------------------------------ #
     # Session handling
     # ------------------------------------------------------------------ #
@@ -323,10 +320,21 @@ class MainWindow(QMainWindow):
     def _overrides_edited(self):
         self._undo_record(('ov',), 'override/profile change')
         self.state.save_settings()
-        # keep the queue's live option in step with the settings pane
+        # keep the queue's live options in step with the settings pane
         self.queue.move_to_subs = self.state.settings.get(
             'move_to_subs_folder', False)
+        self.queue.mux_temp_dir = self.state.settings.get(
+            'mux_temp_dir', '')
         self.preview_pane.schedule_render()
+
+    def _pref_settings_changed(self):
+        """Preferences edits: persist and sync the queue's live options."""
+        self.state.save_settings()
+        self.queue.move_to_subs = self.state.settings.get(
+            'move_to_subs_folder', False)
+        self.queue.mux_temp_dir = self.state.settings.get(
+            'mux_temp_dir', '')
+        self.queue_pane.refresh()
 
     def _queue_settings_edited(self):
         """Queue-pane option toggles (e.g. move-to-subs): persist and

@@ -156,6 +156,10 @@ class QueueManager:
         self.state_path = state_path
         #: after a successful mux, move sources+sups into a 'subs' subfolder
         self.move_to_subs = False
+        #: where muxes write their working file ('' = next to the video,
+        #: 'system', or a folder) — a fast internal drive here makes
+        #: USB-HDD remuxes dramatically faster (sequential passes)
+        self.mux_temp_dir = ''
         self.on_change: Optional[Callable[[], None]] = None
         #: called (from the mux thread) with the video path right before
         #: its mux starts — the UI uses it to release open file handles
@@ -759,7 +763,8 @@ class QueueManager:
             ok, res = remux(group.video_path, subs,
                             replace_original=group.replace_original,
                             progress=progress,
-                            cancel=lambda: self._stop)
+                            cancel=lambda: self._stop,
+                            temp_dir=self.mux_temp_dir)
         except Exception as e:
             # never let a mux crash kill the mux thread — that would
             # silently stall every remaining group
